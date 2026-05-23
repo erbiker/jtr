@@ -1,0 +1,13 @@
+{
+  "name": "clean",
+  "version": "0.1.0",
+  "description": "Smart multi-language clean: target/, dist/, node_modules/, __pycache__/",
+  "homepage": "https://github.com/erbiker/jtr-index/tree/main/recipes/clean",
+  "maintainer": "erbiker",
+  "shells_out_to": ["rm", "find"],
+  "targets": {
+    "just": {
+      "snippet": "# Remove common build/cache directories from the current workspace.\nclean:\n    -rm -rf target dist build .next .turbo coverage .pytest_cache .ruff_cache .mypy_cache\n    -find . -type d -name __pycache__ -prune -exec rm -rf {} +\n    -find . -type d -name node_modules -prune -exec rm -rf {} +\n"
+    }
+  }
+}

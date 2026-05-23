@@ -1,0 +1,13 @@
+{
+  "name": "redis-dev",
+  "version": "0.1.0",
+  "description": "Local Redis dev container with persistence disabled",
+  "homepage": "https://github.com/erbiker/jtr-index/tree/main/recipes/redis-dev",
+  "maintainer": "erbiker",
+  "shells_out_to": ["docker"],
+  "targets": {
+    "just": {
+      "snippet": "REDIS_CONTAINER := \"jtr-redis-dev\"\nREDIS_PORT := env_var_or_default(\"REDIS_PORT\", \"6379\")\n\n# Start a local Redis container (no persistence).\nredis-up:\n    @docker rm -f {{REDIS_CONTAINER}} 2>/dev/null || true\n    docker run --rm -d \\\n      --name {{REDIS_CONTAINER}} \\\n      -p {{REDIS_PORT}}:6379 \\\n      redis:7-alpine --save \"\" --appendonly no\n    @echo \"redis ready on redis://localhost:{{REDIS_PORT}}\"\n\n# Stop the local Redis container.\nredis-down:\n    -docker stop {{REDIS_CONTAINER}}\n\n# Open a redis-cli against the local Redis container.\nredis-cli:\n    docker exec -it {{REDIS_CONTAINER}} redis-cli\n"
+    }
+  }
+}

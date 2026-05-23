@@ -1,0 +1,13 @@
+{
+  "name": "postgres-dev",
+  "version": "0.1.0",
+  "description": "Local PostgreSQL development environment via Docker, with healthcheck",
+  "homepage": "https://github.com/erbiker/jtr-index/tree/main/recipes/postgres-dev",
+  "maintainer": "erbiker",
+  "shells_out_to": ["docker"],
+  "targets": {
+    "just": {
+      "snippet": "POSTGRES_CONTAINER := \"jtr-postgres-dev\"\nPOSTGRES_USER := env_var_or_default(\"POSTGRES_USER\", \"postgres\")\nPOSTGRES_PASSWORD := env_var_or_default(\"POSTGRES_PASSWORD\", \"postgres\")\nPOSTGRES_DB := env_var_or_default(\"POSTGRES_DB\", \"app_dev\")\nPOSTGRES_PORT := env_var_or_default(\"POSTGRES_PORT\", \"5432\")\n\n# Start a local Postgres container and wait until ready.\npostgres-up:\n    @docker rm -f {{POSTGRES_CONTAINER}} 2>/dev/null || true\n    docker run --rm -d \\\n      --name {{POSTGRES_CONTAINER}} \\\n      -p {{POSTGRES_PORT}}:5432 \\\n      -e POSTGRES_USER={{POSTGRES_USER}} \\\n      -e POSTGRES_PASSWORD={{POSTGRES_PASSWORD}} \\\n      -e POSTGRES_DB={{POSTGRES_DB}} \\\n      postgres:16-alpine\n    @echo \"waiting for postgres...\"\n    @for i in $(seq 1 30); do \\\n        docker exec {{POSTGRES_CONTAINER}} pg_isready -U {{POSTGRES_USER}} >/dev/null 2>&1 && exit 0; \\\n        sleep 1; \\\n    done; \\\n    echo \"postgres did not become ready\"; exit 1\n    @echo \"postgres ready on postgresql://{{POSTGRES_USER}}:{{POSTGRES_PASSWORD}}@localhost:{{POSTGRES_PORT}}/{{POSTGRES_DB}}\"\n\n# Stop the local Postgres container.\npostgres-down:\n    -docker stop {{POSTGRES_CONTAINER}}\n\n# Open a psql shell against the local Postgres container.\npostgres-psql:\n    docker exec -it {{POSTGRES_CONTAINER}} psql -U {{POSTGRES_USER}} {{POSTGRES_DB}}\n"
+    }
+  }
+}

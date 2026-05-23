@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "updated": "2026-05-23T00:00:00Z",
+  "recipes": [
+    {
+      "name": "postgres-dev",
+      "version": "0.1.0",
+      "description": "Local PostgreSQL development environment via Docker, with healthcheck",
+      "manifest_url": "recipes/postgres-dev.json",
+      "targets": ["just"]
+    },
+    {
+      "name": "redis-dev",
+      "version": "0.1.0",
+      "description": "Local Redis dev container with persistence disabled",
+      "manifest_url": "recipes/redis-dev.json",
+      "targets": ["just"]
+    },
+    {
+      "name": "rust-lint-format",
+      "version": "0.1.0",
+      "description": "cargo clippy + cargo fmt with sensible flags",
+      "manifest_url": "recipes/rust-lint-format.json",
+      "targets": ["just"]
+    },
+    {
+      "name": "node-lint-format",
+      "version": "0.1.0",
+      "description": "eslint + prettier for Node.js projects",
+      "manifest_url": "recipes/node-lint-format.json",
+      "targets": ["just"]
+    },
+    {
+      "name": "clean",
+      "version": "0.1.0",
+      "description": "Smart multi-language clean: target/, dist/, node_modules/, __pycache__/",
+      "manifest_url": "recipes/clean.json",
+      "targets": ["just"]
+    }
+  ]
+}

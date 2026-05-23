@@ -1,0 +1,9 @@
+# Rust build artifacts
+/target
+
+# Personal agentic-development scaffolding. The .local/ directory holds the
+# project owner's strategic notes, working backlog, and agent contracts. Public
+# contributors coordinate via GitHub Issues, PRs, and Discussions instead.
+/.local/
+/AGENTS.md
+/CLAUDE.md

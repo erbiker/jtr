@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/erbiker/jtr/discussions
+    about: Have a question, an idea, or want to talk about jtr? Open a discussion instead of an issue.
+  - name: Security issue
+    url: https://github.com/erbiker/jtr/security/policy
+    about: Please report security vulnerabilities privately — do not open a public issue.

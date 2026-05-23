@@ -1,0 +1,13 @@
+{
+  "name": "node-lint-format",
+  "version": "0.1.0",
+  "description": "eslint + prettier for Node.js projects",
+  "homepage": "https://github.com/erbiker/jtr-index/tree/main/recipes/node-lint-format",
+  "maintainer": "erbiker",
+  "shells_out_to": ["npx"],
+  "targets": {
+    "just": {
+      "snippet": "# Lint with eslint.\nnode-lint:\n    npx --yes eslint . --max-warnings=0\n\n# Auto-format with prettier.\nnode-fmt:\n    npx --yes prettier --write .\n\n# Verify formatting without modifying files (for CI).\nnode-fmt-check:\n    npx --yes prettier --check .\n"
+    }
+  }
+}

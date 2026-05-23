@@ -1,0 +1,13 @@
+{
+  "name": "rust-lint-format",
+  "version": "0.1.0",
+  "description": "cargo clippy + cargo fmt with sensible flags",
+  "homepage": "https://github.com/erbiker/jtr-index/tree/main/recipes/rust-lint-format",
+  "maintainer": "erbiker",
+  "shells_out_to": ["cargo"],
+  "targets": {
+    "just": {
+      "snippet": "# Lint with clippy, treating warnings as errors.\nrust-lint:\n    cargo clippy --all-targets --all-features -- -D warnings\n\n# Auto-format the entire workspace.\nrust-fmt:\n    cargo fmt --all\n\n# Verify formatting without modifying files (for CI).\nrust-fmt-check:\n    cargo fmt --all -- --check\n"
+    }
+  }
+}
