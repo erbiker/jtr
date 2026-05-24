@@ -6,6 +6,8 @@ mod commands;
 mod index;
 mod managed;
 mod manifest;
+mod sources;
+mod taps;
 mod target;
 
 fn main() -> Result<()> {

@@ -17,6 +17,12 @@ pub struct Registry {
 }
 
 impl Registry {
+    /// Index URL this registry was configured with. Used by `install` to record
+    /// the block's source when the manifest itself doesn't supply a homepage.
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
     pub fn new(index_url: &str) -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
             .user_agent(USER_AGENT)

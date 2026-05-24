@@ -123,6 +123,49 @@ fn write_empty_index(dir: &Path) -> String {
     format!("file://{}/index.json", dir.display())
 }
 
+/// Build a single-recipe temp index used as a "tap" fixture. The recipe ships
+/// with a snippet that puts a recognizable marker in its `@echo` line so a
+/// test can assert which tap the installed block came from.
+fn write_tap_index(dir: &Path, recipe: &str, version: &str, marker: &str) -> String {
+    let recipes_dir = dir.join("recipes");
+    fs::create_dir_all(&recipes_dir).unwrap();
+
+    let manifest = format!(
+        r#"{{
+  "name": "{recipe}",
+  "version": "{version}",
+  "description": "fixture for the {marker} tap",
+  "shells_out_to": [],
+  "targets": {{
+    "just": {{
+      "snippet": "{recipe}:\n    @echo {marker}\n"
+    }}
+  }}
+}}"#
+    );
+    fs::write(recipes_dir.join(format!("{recipe}.json")), &manifest).unwrap();
+    let sha = sha256_hex(manifest.as_bytes());
+
+    let index = format!(
+        r#"{{
+  "version": 1,
+  "recipes": [
+    {{
+      "name": "{recipe}",
+      "version": "{version}",
+      "description": "fixture for the {marker} tap",
+      "manifest_url": "recipes/{recipe}.json",
+      "targets": ["just"],
+      "sha256": "{sha}"
+    }}
+  ]
+}}"#
+    );
+    fs::write(dir.join("index.json"), index).unwrap();
+
+    format!("file://{}/index.json", dir.display())
+}
+
 fn project_with_justfile(initial: &str) -> TempDir {
     let dir = TempDir::new().expect("create temp dir");
     fs::write(dir.path().join("justfile"), initial).expect("write justfile");
@@ -672,6 +715,284 @@ fn doctor_reports_missing_tool_and_fails() {
         .failure()
         .stdout(str::contains("definitely-not-a-real-tool-xyz123"))
         .stdout(str::contains("not found in PATH"));
+}
+
+#[test]
+fn tap_add_list_remove_roundtrip() {
+    let config_dir = TempDir::new().unwrap();
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "list"])
+        .assert()
+        .success()
+        .stdout(str::contains("no taps configured"));
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args([
+            "tap",
+            "add",
+            "alice/recipes",
+            "--url",
+            "file:///tmp/fake-index.json",
+        ])
+        .assert()
+        .success()
+        .stdout(str::contains("added tap"))
+        .stdout(str::contains("alice/recipes"));
+
+    let taps_file = fs::read_to_string(config_dir.path().join("taps.toml")).unwrap();
+    assert!(taps_file.contains("alice/recipes"));
+    assert!(taps_file.contains("file:///tmp/fake-index.json"));
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "list"])
+        .assert()
+        .success()
+        .stdout(str::contains("alice/recipes"));
+
+    // Re-adding the same tap+URL is idempotent, not an error.
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args([
+            "tap",
+            "add",
+            "alice/recipes",
+            "--url",
+            "file:///tmp/fake-index.json",
+        ])
+        .assert()
+        .success()
+        .stdout(str::contains("already configured"));
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "remove", "alice/recipes"])
+        .assert()
+        .success()
+        .stdout(str::contains("removed tap"));
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "list"])
+        .assert()
+        .success()
+        .stdout(str::contains("no taps configured"));
+}
+
+#[test]
+fn tap_add_rejects_bad_names() {
+    let config_dir = TempDir::new().unwrap();
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "add", "not-a-user-repo-pair"])
+        .assert()
+        .failure()
+        .stderr(str::contains("user/repo"));
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "add", "too/many/slashes"])
+        .assert()
+        .failure()
+        .stderr(str::contains("user/repo"));
+}
+
+#[test]
+fn tap_remove_unknown_errors() {
+    let config_dir = TempDir::new().unwrap();
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "remove", "ghost/recipes"])
+        .assert()
+        .failure()
+        .stderr(str::contains("not configured"));
+}
+
+#[test]
+fn search_spans_curated_and_tap_with_source_labels() {
+    let config_dir = TempDir::new().unwrap();
+    let tap_dir = TempDir::new().unwrap();
+    let tap_index = write_tap_index(tap_dir.path(), "tap-only-recipe", "0.1.0", "from-alice");
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "add", "alice/recipes", "--url", &tap_index])
+        .assert()
+        .success();
+
+    let assert = jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .arg("search")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    // Curated recipes are still listed by bare name.
+    assert!(
+        stdout.contains("postgres-dev"),
+        "expected curated postgres-dev in search output:\n{stdout}"
+    );
+    // Tap recipes appear with the `tap-name/recipe` display form so users can paste them into install.
+    assert!(
+        stdout.contains("alice/recipes/tap-only-recipe"),
+        "expected tap-prefixed recipe name in search output:\n{stdout}"
+    );
+    // The source label column gives the provenance.
+    assert!(
+        stdout.contains("curated"),
+        "expected 'curated' label in search output:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("alice/recipes"),
+        "expected tap label in search output:\n{stdout}"
+    );
+}
+
+#[test]
+fn install_from_tap_writes_prefixed_block() {
+    let config_dir = TempDir::new().unwrap();
+    let tap_dir = TempDir::new().unwrap();
+    let tap_index = write_tap_index(tap_dir.path(), "fancy-build", "0.1.0", "tap-marker");
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "add", "alice/recipes", "--url", &tap_index])
+        .assert()
+        .success();
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["install", "alice/recipes/fancy-build"])
+        .assert()
+        .success()
+        .stdout(str::contains("installed"))
+        .stdout(str::contains("alice/recipes/fancy-build"));
+
+    let result = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(result.contains("# >>> jtr:alice/recipes/fancy-build@0.1.0 >>>"));
+    assert!(result.contains("# <<< jtr:alice/recipes/fancy-build <<<"));
+    assert!(result.contains("tap-marker"));
+    assert!(
+        result.contains("default:\n    @echo hi"),
+        "original content preserved"
+    );
+
+    // list should surface the tap-prefixed block name.
+    jtr()
+        .current_dir(project.path())
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(str::contains("alice/recipes/fancy-build"));
+
+    // Removing the tap block uses its full prefixed name.
+    jtr()
+        .current_dir(project.path())
+        .args(["remove", "alice/recipes/fancy-build"])
+        .assert()
+        .success();
+
+    let after_remove = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(!after_remove.contains("alice/recipes/fancy-build"));
+}
+
+#[test]
+fn install_tap_recipe_when_tap_is_not_configured_errors() {
+    let config_dir = TempDir::new().unwrap();
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["install", "ghost/repo/anything"])
+        .assert()
+        .failure()
+        .stderr(str::contains("not found"));
+}
+
+#[test]
+fn update_refreshes_tap_recipe_to_new_version() {
+    let config_dir = TempDir::new().unwrap();
+    let tap_dir = TempDir::new().unwrap();
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    let v1 = write_tap_index(tap_dir.path(), "thing", "0.1.0", "v1-marker");
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "add", "alice/recipes", "--url", &v1])
+        .assert()
+        .success();
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["install", "alice/recipes/thing"])
+        .assert()
+        .success();
+
+    // Republish the same tap index at a newer version.
+    let _v2 = write_tap_index(tap_dir.path(), "thing", "0.2.0", "v2-marker");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["update", "alice/recipes/thing"])
+        .assert()
+        .success()
+        .stdout(str::contains("updated"))
+        .stdout(str::contains("0.1.0"))
+        .stdout(str::contains("0.2.0"));
+
+    let after = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(after.contains("# >>> jtr:alice/recipes/thing@0.2.0 >>>"));
+    assert!(after.contains("v2-marker"));
+    assert!(!after.contains("v1-marker"));
+}
+
+#[test]
+fn doctor_treats_tap_block_as_first_class() {
+    let config_dir = TempDir::new().unwrap();
+    let tap_dir = TempDir::new().unwrap();
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    let tap_index = write_tap_index(tap_dir.path(), "thing", "0.1.0", "tap-marker");
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "add", "alice/recipes", "--url", &tap_index])
+        .assert()
+        .success();
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["install", "alice/recipes/thing"])
+        .assert()
+        .success();
+
+    // doctor passes — the tap is reachable and the version matches.
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(str::contains("up to date"))
+        .stdout(str::contains("alice/recipes/thing"))
+        .stdout(str::contains("all checks passed"));
 }
 
 #[test]

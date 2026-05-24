@@ -1,32 +1,31 @@
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 
-use crate::index::Registry;
 use crate::managed;
+use crate::sources::{Sources, block_name_for};
 use crate::target;
 
 pub fn run(index_url: &str, name: &str, file_override: Option<&str>) -> Result<()> {
     managed::validate_name(name)?;
 
     let (path, target) = target::resolve(file_override)?;
-    let registry = Registry::new(index_url)?;
-    let index = registry.load_index()?;
+    let sources = Sources::load(index_url)?;
 
-    let entry = index
-        .recipes
-        .iter()
-        .find(|r| r.name == name)
-        .ok_or_else(|| {
-            anyhow::anyhow!("recipe '{}' not found in registry at {}", name, index_url)
-        })?;
+    let (source, entry) = sources.find(name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "recipe '{}' not found in the curated index or any configured tap",
+            name
+        )
+    })?;
 
-    let manifest = registry.load_manifest(entry)?;
+    let manifest = source.registry.load_manifest(entry)?;
+    let block_name = block_name_for(&source.label, &manifest.name);
 
     let target_key = target.as_str();
     let target_recipe = manifest.targets.get(target_key).ok_or_else(|| {
         anyhow::anyhow!(
             "recipe '{}' does not support target '{}' (supports: {})",
-            manifest.name,
+            block_name,
             target_key,
             manifest
                 .targets
@@ -52,22 +51,29 @@ pub fn run(index_url: &str, name: &str, file_override: Option<&str>) -> Result<(
 
     let already_installed = managed::parse_all(&existing)
         .iter()
-        .any(|b| b.name == manifest.name);
+        .any(|b| b.name == block_name);
+
+    let source_link = manifest.homepage.clone().unwrap_or_else(|| {
+        // Fall back to the source's index URL so the block records where it came
+        // from — particularly useful for tap recipes, where the bare recipe name
+        // doesn't tell you which tap published it.
+        source.registry.base().to_string()
+    });
 
     let rendered = managed::render(
-        &manifest.name,
+        &block_name,
         &manifest.version,
-        manifest.homepage.as_deref().or(Some(index_url)),
+        Some(&source_link),
         &target_recipe.snippet,
     );
 
-    let updated = managed::upsert(&existing, &manifest.name, &rendered)?;
+    let updated = managed::upsert(&existing, &block_name, &rendered)?;
 
     if updated == existing {
         println!(
             "{} {} {} already at version {}",
             "✓".green(),
-            manifest.name.bold(),
+            block_name.bold(),
             "—".dimmed(),
             manifest.version
         );
@@ -87,7 +93,7 @@ pub fn run(index_url: &str, name: &str, file_override: Option<&str>) -> Result<(
         "{} {} {} ({}) — {}",
         "✓".green(),
         action.bold(),
-        manifest.name.bold(),
+        block_name.bold(),
         manifest.version,
         path.display()
     );
