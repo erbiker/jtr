@@ -8,6 +8,19 @@ repository = "https://github.com/erbiker/jtr"
 readme = "README.md"
 keywords = ["just", "task", "recipes", "registry", "cli"]
 categories = ["command-line-utilities", "development-tools"]
+exclude = [
+  ".github/*",
+  ".local/*",
+  "jtr-index/*",
+  "scripts/*",
+  "tests/*",
+  "CODE_OF_CONDUCT.md",
+  "CONTRIBUTING.md",
+  "SECURITY.md",
+  "TESTING.md",
+  "deny.toml",
+  "justfile",
+]
 
 [[bin]]
 name = "jtr"
