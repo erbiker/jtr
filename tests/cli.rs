@@ -1683,3 +1683,258 @@ fn install_into_taskfile_errors_because_no_seed_supports_task_yet() {
         .failure()
         .stderr(str::contains("does not support target 'task'"));
 }
+
+#[test]
+fn show_prints_the_block_a_curated_install_would_write() {
+    let project = project_with_justfile("default:\n    @echo hi\n");
+    let config_dir = TempDir::new().unwrap();
+
+    let assert = jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["show", "postgres-dev"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(
+        stdout.contains("# >>> jtr:postgres-dev@0.1.0 >>>"),
+        "show should print the rendered open marker, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("# <<< jtr:postgres-dev <<<"),
+        "show should print the rendered close marker, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("postgres-up:"),
+        "show should include the recipe body, got:\n{stdout}"
+    );
+
+    // The project file is not modified.
+    let after = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert_eq!(after, "default:\n    @echo hi\n");
+}
+
+#[test]
+fn show_prints_the_block_a_tap_install_would_write() {
+    let config_dir = TempDir::new().unwrap();
+    let tap_dir = TempDir::new().unwrap();
+    let tap_index = write_tap_index(tap_dir.path(), "fancy-build", "0.1.0", "tap-marker");
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "add", "alice/recipes", "--url", &tap_index])
+        .assert()
+        .success();
+
+    let assert = jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["show", "alice/recipes/fancy-build"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(
+        stdout.contains("# >>> jtr:alice/recipes/fancy-build@0.1.0 >>>"),
+        "tap show should use the prefixed block name, got:\n{stdout}"
+    );
+    assert!(stdout.contains("tap-marker"), "got:\n{stdout}");
+
+    // The project file is not modified.
+    let after = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert_eq!(after, "default:\n    @echo hi\n");
+}
+
+#[test]
+fn show_with_pin_picks_the_requested_version() {
+    let project = project_with_justfile("default:\n    @echo hi\n");
+    let index_dir = TempDir::new().unwrap();
+    let index_url = write_multi_version_index(index_dir.path(), "demo", &["0.2.0", "0.1.0"]);
+
+    let assert = jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["show", "demo@0.1.0"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("# >>> jtr:demo@0.1.0 >>>"),
+        "show @0.1.0 should render the pinned version, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("# pinned: 0.1.0"),
+        "show @0.1.0 should record the pin marker, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("marker-0.1.0"),
+        "show @0.1.0 should include the 0.1.0 snippet, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("marker-0.2.0"),
+        "show @0.1.0 should not leak the 0.2.0 snippet, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn show_errors_when_recipe_does_not_exist() {
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["show", "does-not-exist"])
+        .assert()
+        .failure()
+        .stderr(str::contains("not found"));
+}
+
+#[test]
+fn show_errors_when_tap_is_not_configured() {
+    let project = project_with_justfile("default:\n    @echo hi\n");
+    let config_dir = TempDir::new().unwrap();
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["show", "ghost/repo/anything"])
+        .assert()
+        .failure()
+        .stderr(str::contains("tap 'ghost/repo' is not configured"));
+}
+
+#[test]
+fn diff_of_an_unmodified_install_exits_zero_with_no_output() {
+    let project = project_with_justfile("default:\n    @echo hi\n");
+    let config_dir = TempDir::new().unwrap();
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["install", "postgres-dev"])
+        .assert()
+        .success();
+
+    let assert = jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["diff", "postgres-dev"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.is_empty(),
+        "no-diff case should produce empty stdout, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn diff_after_a_version_bump_exits_one_with_a_unified_diff() {
+    let project = project_with_justfile("default:\n    @echo hi\n");
+    let registry_dir = TempDir::new().unwrap();
+
+    let v1 = write_postgres_dev_index(registry_dir.path(), "0.1.0");
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &v1)
+        .args(["install", "postgres-dev"])
+        .assert()
+        .success();
+
+    let v2 = write_postgres_dev_index(registry_dir.path(), "0.2.0");
+    let assert = jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &v2)
+        .args(["diff", "postgres-dev"])
+        .assert()
+        .failure()
+        .code(1);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("--- a/postgres-dev"),
+        "diff should print a unified-diff header, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("+++ b/postgres-dev"),
+        "diff should print a unified-diff header, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("-# >>> jtr:postgres-dev@0.1.0 >>>"),
+        "diff should show the old version line removed, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("+# >>> jtr:postgres-dev@0.2.0 >>>"),
+        "diff should show the new version line added, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("-    @echo marker-0.1.0"),
+        "diff should show the old snippet removed, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("+    @echo marker-0.2.0"),
+        "diff should show the new snippet added, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn diff_of_uninstalled_recipe_renders_whole_block_as_additions() {
+    let project = project_with_justfile("default:\n    @echo hi\n");
+    let config_dir = TempDir::new().unwrap();
+
+    let assert = jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["diff", "postgres-dev"])
+        .assert()
+        .failure()
+        .code(1);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("--- a/postgres-dev (not installed)"),
+        "diff should mark the left side as not installed, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("+# >>> jtr:postgres-dev@0.1.0 >>>"),
+        "diff should render the whole block as additions, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("+# <<< jtr:postgres-dev <<<"),
+        "diff should render the close marker as an addition, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn diff_of_pinned_block_compares_against_the_pin_not_latest() {
+    // Install pinned to 0.1.0 while the registry already has 0.2.0. Then bump
+    // the registry to 0.3.0. Plain `jtr diff demo` should still exit 0 because
+    // the on-disk block matches what `install demo@0.1.0` would write — pinning
+    // is a deliberate freeze, and drift against latest is *not* what the user
+    // signed up for. `update --unpin` is the way out, not noisy diff output.
+    let project = project_with_justfile("default:\n    @echo hi\n");
+    let index_dir = TempDir::new().unwrap();
+    let index_url = write_multi_version_index(index_dir.path(), "demo", &["0.2.0", "0.1.0"]);
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["install", "demo@0.1.0"])
+        .assert()
+        .success();
+
+    write_multi_version_index(index_dir.path(), "demo", &["0.3.0", "0.2.0", "0.1.0"]);
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["diff", "demo"])
+        .assert()
+        .success();
+}

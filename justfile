@@ -61,6 +61,8 @@ smoke: build
     printf 'default:\n    @echo hi\n' > justfile
     JTR_INDEX_URL="$INDEX" "$BIN" install postgres-dev
     JTR_INDEX_URL="$INDEX" "$BIN" install rust-lint-format
+    JTR_INDEX_URL="$INDEX" "$BIN" show redis-dev | grep -q '^# >>> jtr:redis-dev@'
+    JTR_INDEX_URL="$INDEX" "$BIN" diff rust-lint-format
     JTR_INDEX_URL="$INDEX" "$BIN" list
     just --justfile justfile --list >/dev/null
     JTR_INDEX_URL="$INDEX" "$BIN" remove postgres-dev

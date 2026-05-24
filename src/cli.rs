@@ -76,6 +76,22 @@ pub enum Command {
     ///
     /// Exits non-zero if any problems are found, so this is suitable as a CI gate.
     Doctor,
+    /// Print the rendered managed block that `jtr install <name>` would write,
+    /// without touching the project file. Useful for auditing a recipe before
+    /// it lands — especially when pulling from a community tap.
+    Show {
+        /// Recipe name (e.g. postgres-dev or user/repo/recipe). Accepts an
+        /// optional `@version` to inspect a specific published version.
+        name: String,
+    },
+    /// Show a unified diff between the currently-installed block and the block
+    /// `jtr install <name>` would write right now. Exits 0 if identical, 1 if
+    /// there's a diff — drop-in for CI "are my recipes current" checks.
+    Diff {
+        /// Recipe name (e.g. postgres-dev or user/repo/recipe). Accepts an
+        /// optional `@version` to compare against a specific published version.
+        name: String,
+    },
     /// Manage community taps — extra indices outside the curated registry.
     Tap {
         #[command(subcommand)]
@@ -106,6 +122,12 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::List => commands::list::run(file_override.as_deref()),
         Command::Search { query } => commands::search::run(&index_url, query.as_deref(), use_cache),
         Command::Doctor => commands::doctor::run(&index_url, file_override.as_deref(), use_cache),
+        Command::Show { name } => {
+            commands::show::run(&index_url, &name, file_override.as_deref(), use_cache)
+        }
+        Command::Diff { name } => {
+            commands::diff::run(&index_url, &name, file_override.as_deref(), use_cache)
+        }
         Command::Tap { command } => commands::tap::run(command),
     }
 }

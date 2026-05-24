@@ -189,6 +189,26 @@ jtr --no-cache install postgres-dev
 
 Cache writes are best-effort: a full disk or read-only filesystem prints a yellow warning and the command keeps going.
 
+### Audit before install: `jtr show` + `jtr diff`
+
+To see exactly what a recipe would write before it touches your project file:
+
+```sh
+jtr show postgres-dev                  # print the rendered managed block to stdout
+jtr show postgres-dev@0.1.0            # ...at a specific pinned version
+jtr show alice/recipes/nice-thing      # ...or from a community tap
+```
+
+`jtr show` resolves through the same path as install (curated, tap-qualified, version-pinned) but never touches the project file. Especially useful when pulling from a tap you haven't audited yet.
+
+To check whether the on-disk block has drifted from what `jtr install` would write right now:
+
+```sh
+jtr diff postgres-dev                  # exit 0 if identical, 1 if there's a diff
+```
+
+`jtr diff` is a CI-friendly drop-in for "are my recipes current": exit 0 means no diff, exit 1 means the on-disk block doesn't match (drifted, out-of-date, or never installed). Pinned blocks diff against their pinned version, not latest — pinning is a deliberate freeze, so drift against latest is `jtr doctor`'s job, not `diff`'s.
+
 ### Diagnose with `jtr doctor`
 
 ```sh
