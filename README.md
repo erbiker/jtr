@@ -8,6 +8,7 @@
 `just` and `task` are loved tools, but every project reimplements the same recipes: dev containers, lint+format, deploys, migrations, you name it. Sharing today is copy-paste from blog posts. **`jtr` is the missing thin registry + UX layer** — vetted, versioned, and installable in one command:
 
 ```sh
+jtr init                   # scaffold a justfile in a brand-new project
 jtr search docker          # browse the registry
 jtr install postgres-dev   # add a recipe to your justfile
 jtr update postgres-dev    # pull the latest version (or `jtr update` for all)
@@ -42,6 +43,16 @@ Requires Rust 1.95 or newer.
 Coming with the first tagged release. Track [issue #1](https://github.com/erbiker/jtr/issues/1) for distribution updates.
 
 ## Usage
+
+### Start a fresh project
+
+```sh
+cd ~/code/my-new-project
+jtr init                  # creates ./justfile with a `default:` recipe that lists tasks
+jtr init --target task    # ...or ./Taskfile.yml for the `task` runner
+```
+
+`jtr init` refuses to overwrite an existing `justfile` (or `Taskfile.yml`), so it's safe to run in a directory you're not sure about.
 
 ### Search the registry
 
@@ -121,7 +132,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development workflow.
 
 The roadmap is tracked in [GitHub Issues](https://github.com/erbiker/jtr/issues) and discussed in [Discussions](https://github.com/erbiker/jtr/discussions). Near-term focus:
 
-- **`jtr init`** — scaffold a fresh `justfile` / `Taskfile.yml`.
 - **`jtr tap <user/repo>`** — Homebrew-style decentralized publishing for community recipes that don't fit the curated index.
 - **Recipe dependencies** — one recipe pulls in others it depends on.
 - **`jtr doctor`** — diagnose missing tools, stale blocks, version drift.

@@ -402,6 +402,106 @@ fn update_refreshes_block_when_user_has_hand_edited_it() {
 }
 
 #[test]
+fn init_creates_justfile_in_empty_dir() {
+    let project = TempDir::new().unwrap();
+
+    jtr()
+        .current_dir(project.path())
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(str::contains("created"))
+        .stdout(str::contains("justfile"));
+
+    let body = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(
+        body.contains("default:"),
+        "scaffolded justfile body: {body}"
+    );
+    assert!(
+        body.contains("just --list"),
+        "scaffolded justfile body: {body}"
+    );
+}
+
+#[test]
+fn init_with_target_task_creates_taskfile() {
+    let project = TempDir::new().unwrap();
+
+    jtr()
+        .current_dir(project.path())
+        .args(["init", "--target", "task"])
+        .assert()
+        .success()
+        .stdout(str::contains("Taskfile.yml"));
+
+    let body = fs::read_to_string(project.path().join("Taskfile.yml")).unwrap();
+    assert!(
+        body.contains("version: '3'"),
+        "scaffolded Taskfile body: {body}"
+    );
+    assert!(
+        body.contains("default:"),
+        "scaffolded Taskfile body: {body}"
+    );
+    assert!(
+        body.contains("task --list"),
+        "scaffolded Taskfile body: {body}"
+    );
+}
+
+#[test]
+fn init_refuses_to_overwrite_existing_justfile() {
+    let project = TempDir::new().unwrap();
+    fs::write(
+        project.path().join("justfile"),
+        "my-recipe:\n    @echo mine\n",
+    )
+    .unwrap();
+
+    jtr()
+        .current_dir(project.path())
+        .arg("init")
+        .assert()
+        .failure()
+        .stderr(str::contains("already exists"))
+        .stderr(str::contains("refusing to overwrite"));
+
+    let preserved = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert_eq!(
+        preserved, "my-recipe:\n    @echo mine\n",
+        "existing justfile must not be touched"
+    );
+}
+
+#[test]
+fn init_install_against_freshly_scaffolded_justfile() {
+    // The whole point of `jtr init` is letting a fresh project use `jtr install`
+    // immediately afterward. Make sure the round trip actually works end-to-end.
+    let project = TempDir::new().unwrap();
+
+    jtr()
+        .current_dir(project.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["install", "postgres-dev"])
+        .assert()
+        .success();
+
+    let body = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(body.contains("# >>> jtr:postgres-dev@0.1.0 >>>"));
+    assert!(
+        body.contains("default:"),
+        "scaffold-template must survive install"
+    );
+}
+
+#[test]
 fn install_into_taskfile_errors_because_no_seed_supports_task_yet() {
     // Seed recipes only declare a `just` target today. Installing into a Taskfile.yml
     // should fail with a clear "does not support target 'task'" message. When the first

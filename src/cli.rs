@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::commands;
+use crate::target::Target;
 
 const DEFAULT_INDEX_URL: &str =
     "https://raw.githubusercontent.com/erbiker/jtr-index/main/index.json";
@@ -28,6 +29,12 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Scaffold a fresh justfile (or Taskfile.yml) in the current directory.
+    Init {
+        /// Which project file to create. Defaults to `just`.
+        #[arg(long, value_enum, default_value_t = Target::Just)]
+        target: Target,
+    },
     /// Install a recipe into your project file.
     Install {
         /// Recipe name (e.g. postgres-dev).
@@ -56,6 +63,7 @@ pub fn run(cli: Cli) -> Result<()> {
     let file_override = cli.file;
 
     match cli.command {
+        Command::Init { target } => commands::init::run(target),
         Command::Install { name } => {
             commands::install::run(&index_url, &name, file_override.as_deref())
         }
