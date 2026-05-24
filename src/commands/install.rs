@@ -8,12 +8,13 @@ use crate::sources::{Source, Sources, block_name_for};
 use crate::target;
 
 pub fn run(index_url: &str, name: &str, file_override: Option<&str>) -> Result<()> {
-    managed::validate_name(name)?;
+    let (recipe_name, pin) = split_pin(name)?;
+    managed::validate_name(&recipe_name)?;
 
     let (path, target) = target::resolve(file_override)?;
     let sources = Sources::load(index_url)?;
 
-    let order = resolve_install_order(&sources, name)?;
+    let order = resolve_install_order(&sources, &recipe_name, pin.as_deref())?;
 
     let target_key = target.as_str();
     for plan in &order {
@@ -79,6 +80,7 @@ pub fn run(index_url: &str, name: &str, file_override: Option<&str>) -> Result<(
             &plan.block_name,
             &plan.manifest.version,
             Some(&source_link),
+            plan.pinned.as_deref(),
             &plan.manifest.dependencies,
             &target_recipe.snippet,
         );
@@ -109,22 +111,29 @@ pub fn run(index_url: &str, name: &str, file_override: Option<&str>) -> Result<(
         } else {
             String::new()
         };
+        let pin_suffix = if plan.pinned.is_some() {
+            format!(" {}", "(pinned)".dimmed())
+        } else {
+            String::new()
+        };
         match action.as_str() {
             "already-current" => println!(
-                "{} {} {} already at version {}{}",
+                "{} {} {} already at version {}{}{}",
                 "✓".green(),
                 plan.block_name.bold(),
                 "—".dimmed(),
                 plan.manifest.version,
+                pin_suffix,
                 dep_suffix
             ),
             other => println!(
-                "{} {} {} ({}) — {}{}",
+                "{} {} {} ({}) — {}{}{}",
                 "✓".green(),
                 other.bold(),
                 plan.block_name.bold(),
                 plan.manifest.version,
                 path.display(),
+                pin_suffix,
                 dep_suffix
             ),
         }
@@ -145,13 +154,42 @@ struct Plan<'a> {
     manifest: RecipeManifest,
     /// True if this plan was pulled in transitively (not directly named by the user).
     is_dependency: bool,
+    /// Set when the user asked for this specific version (`foo@1.2.0`). Only the
+    /// user-requested root ever carries a pin — transitive deps stay free per
+    /// the v1 design (no lockfile yet).
+    pinned: Option<String>,
+}
+
+/// Split `foo@1.2.0` into `("foo", Some("1.2.0"))`. Bare names return `(name, None)`.
+/// Errors if the `@version` half is empty (e.g. user typed `foo@`).
+fn split_pin(input: &str) -> Result<(String, Option<String>)> {
+    match input.rsplit_once('@') {
+        Some((name, version)) => {
+            if name.is_empty() {
+                bail!("recipe name is empty before '@version'");
+            }
+            if version.is_empty() {
+                bail!(
+                    "version is empty after '@' in '{input}'. \
+                     Use `jtr install {name}` for the latest, or `jtr install {name}@<version>` to pin."
+                );
+            }
+            Ok((name.to_string(), Some(version.to_string())))
+        }
+        None => Ok((input.to_string(), None)),
+    }
 }
 
 /// Topologically order `root` and every transitive dependency so each item appears
 /// after the things it depends on. Errors on cycles, naming both endpoints in the
 /// error message. The first element of the returned `Vec` is the leaf-most dep;
-/// the last is the user-requested `root`.
-fn resolve_install_order<'a>(sources: &'a Sources, root: &str) -> Result<Vec<Plan<'a>>> {
+/// the last is the user-requested `root`. The `root_pin` is plumbed into the root's
+/// `Plan` only — deps always resolve to latest.
+fn resolve_install_order<'a>(
+    sources: &'a Sources,
+    root: &str,
+    root_pin: Option<&str>,
+) -> Result<Vec<Plan<'a>>> {
     let mut visited: HashSet<String> = HashSet::new();
     let mut order: Vec<Plan<'a>> = Vec::new();
     let mut cache: HashMap<String, RecipeManifest> = HashMap::new();
@@ -160,6 +198,7 @@ fn resolve_install_order<'a>(sources: &'a Sources, root: &str) -> Result<Vec<Pla
         sources,
         root,
         root,
+        root_pin,
         &mut visited,
         &mut Vec::new(),
         &mut order,
@@ -174,6 +213,7 @@ fn visit<'a>(
     sources: &'a Sources,
     requested_root: &str,
     name: &str,
+    pin: Option<&str>,
     visited: &mut HashSet<String>,
     on_stack: &mut Vec<String>,
     order: &mut Vec<Plan<'a>>,
@@ -191,11 +231,11 @@ fn visit<'a>(
     }
 
     let (source, entry) = sources
-        .find(name)
+        .find_at(name, pin)?
         .ok_or_else(|| describe_missing(sources, requested_root, name))?;
     let manifest = source
         .registry
-        .load_manifest(entry)
+        .load_manifest(&entry)
         .with_context(|| format!("could not load manifest for '{name}'"))?;
 
     on_stack.push(name.to_string());
@@ -207,6 +247,7 @@ fn visit<'a>(
             sources,
             requested_root,
             &dep,
+            None,
             visited,
             on_stack,
             order,
@@ -223,6 +264,7 @@ fn visit<'a>(
         source,
         manifest,
         is_dependency,
+        pinned: pin.map(|s| s.to_string()),
     });
     visited.insert(name.to_string());
     Ok(())

@@ -7,6 +7,7 @@ use anyhow::{Result, anyhow, bail};
 /// ```text
 /// # >>> jtr:<name>@<version> >>>
 /// # source: <homepage_or_index>
+/// # pinned: <version>                   (omitted when not pinned)
 /// # depends-on: <name>, <name>          (omitted when empty)
 /// # do not edit manually; use `jtr update <name>` or `jtr remove <name>`
 /// <snippet>
@@ -21,6 +22,10 @@ pub struct ManagedBlock {
     /// Names of recipes this block declares as dependencies. Recorded inline so
     /// `jtr remove` can compute reverse-deps without hitting the network.
     pub dependencies: Vec<String>,
+    /// When `Some(v)`, the user explicitly asked for this version (`jtr install
+    /// foo@v`). `jtr update` then refuses to bump the block, and `jtr doctor`
+    /// treats matching the pin as healthy rather than out-of-date.
+    pub pinned: Option<String>,
 }
 
 pub fn open_marker(name: &str) -> String {
@@ -35,11 +40,15 @@ pub fn render(
     name: &str,
     version: &str,
     source: Option<&str>,
+    pinned: Option<&str>,
     dependencies: &[String],
     snippet: &str,
 ) -> String {
     let source_line = source
         .map(|s| format!("# source: {s}\n", s = s))
+        .unwrap_or_default();
+    let pinned_line = pinned
+        .map(|v| format!("# pinned: {v}\n"))
         .unwrap_or_default();
     let depends_line = if dependencies.is_empty() {
         String::new()
@@ -50,6 +59,7 @@ pub fn render(
     format!(
         "# >>> jtr:{name}@{version} >>>\n\
          {source_line}\
+         {pinned_line}\
          {depends_line}\
          # do not edit manually; use `jtr update {name}` or `jtr remove {name}`\n\
          {body}\n\
@@ -57,6 +67,7 @@ pub fn render(
         name = name,
         version = version,
         source_line = source_line,
+        pinned_line = pinned_line,
         depends_line = depends_line,
         body = trimmed,
     )
@@ -81,12 +92,14 @@ pub fn parse_all(doc: &str) -> Vec<ManagedBlock> {
             }
             if found_close {
                 let dependencies = parse_dependencies(&body_lines);
+                let pinned = parse_pinned(&body_lines);
                 let body = strip_internal_header(&body_lines).join("\n");
                 out.push(ManagedBlock {
                     name,
                     version,
                     body,
                     dependencies,
+                    pinned,
                 });
             }
         }
@@ -195,13 +208,14 @@ fn parse_open(line: &str) -> Option<(String, String)> {
 }
 
 fn strip_internal_header(lines: &[String]) -> Vec<String> {
-    // Drop leading "# source:", "# depends-on:", and "# do not edit" lines that we wrote
-    // ourselves so callers see just the recipe body.
+    // Drop leading "# source:", "# pinned:", "# depends-on:", and "# do not edit"
+    // lines that we wrote ourselves so callers see just the recipe body.
     lines
         .iter()
         .skip_while(|l| {
             let t = l.trim_start();
             t.starts_with("# source:")
+                || t.starts_with("# pinned:")
                 || t.starts_with("# depends-on:")
                 || t.starts_with("# do not edit")
         })
@@ -219,12 +233,36 @@ fn parse_dependencies(lines: &[String]) -> Vec<String> {
                 .filter(|s| !s.is_empty())
                 .collect();
         }
-        // Only scan the header — once we hit a non-header line, stop.
-        if !t.starts_with("# source:") && !t.starts_with("# do not edit") && !t.is_empty() {
+        if !is_header_line(t) {
             break;
         }
     }
     Vec::new()
+}
+
+fn parse_pinned(lines: &[String]) -> Option<String> {
+    for line in lines {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("# pinned:") {
+            let v = rest.trim();
+            if v.is_empty() {
+                return None;
+            }
+            return Some(v.to_string());
+        }
+        if !is_header_line(t) {
+            break;
+        }
+    }
+    None
+}
+
+fn is_header_line(trimmed: &str) -> bool {
+    trimmed.is_empty()
+        || trimmed.starts_with("# source:")
+        || trimmed.starts_with("# pinned:")
+        || trimmed.starts_with("# depends-on:")
+        || trimmed.starts_with("# do not edit")
 }
 
 /// Convenience: confirm a string looks like a valid recipe name.
@@ -254,6 +292,7 @@ mod tests {
             "postgres-dev",
             "0.1.0",
             Some("https://example.com"),
+            None,
             &[],
             "pg-up:\n    docker run ...\n",
         );
@@ -274,6 +313,7 @@ mod tests {
             "fancy-build",
             "0.2.0",
             Some("https://example.com"),
+            None,
             &deps,
             "fancy:\n    @echo hi\n",
         );
@@ -287,14 +327,45 @@ mod tests {
     }
 
     #[test]
+    fn render_and_parse_roundtrip_with_pin() {
+        let block = render(
+            "postgres-dev",
+            "0.1.0",
+            Some("https://example.com"),
+            Some("0.1.0"),
+            &["clean".to_string()],
+            "pg-up:\n    docker run ...\n",
+        );
+        assert!(block.contains("# pinned: 0.1.0"));
+        // pinned line should appear between source and depends-on.
+        let src = block.find("# source:").unwrap();
+        let pin = block.find("# pinned:").unwrap();
+        let dep = block.find("# depends-on:").unwrap();
+        assert!(src < pin && pin < dep);
+
+        let parsed = parse_all(&block);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].pinned.as_deref(), Some("0.1.0"));
+        assert_eq!(parsed[0].dependencies, vec!["clean".to_string()]);
+        assert!(!parsed[0].body.contains("pinned:"));
+        assert!(!parsed[0].body.contains("depends-on"));
+    }
+
+    #[test]
+    fn render_omits_pinned_line_when_none() {
+        let block = render("foo", "0.1.0", None, None, &[], "bar:\n    @echo hi\n");
+        assert!(!block.contains("# pinned:"));
+    }
+
+    #[test]
     fn render_omits_depends_line_when_empty() {
-        let block = render("foo", "0.1.0", None, &[], "bar:\n    @echo hi\n");
+        let block = render("foo", "0.1.0", None, None, &[], "bar:\n    @echo hi\n");
         assert!(!block.contains("# depends-on:"));
     }
 
     #[test]
     fn remove_strips_block_and_collapses_blanks() {
-        let block = render("foo", "0.1.0", None, &[], "bar:\n    @echo hi\n");
+        let block = render("foo", "0.1.0", None, None, &[], "bar:\n    @echo hi\n");
         let doc = format!("first:\n    @echo a\n\n{}\nlast:\n    @echo b\n", block);
         let (out, removed) = remove(&doc, "foo");
         assert!(removed);
@@ -308,7 +379,7 @@ mod tests {
 
     #[test]
     fn remove_trailing_block_does_not_leave_blank_tail() {
-        let block = render("foo", "0.1.0", None, &[], "bar:\n    @echo hi");
+        let block = render("foo", "0.1.0", None, None, &[], "bar:\n    @echo hi");
         let doc = format!("default:\n    @echo a\n\n{}", block);
         let (out, _) = remove(&doc, "foo");
         assert!(out.ends_with("@echo a\n"));
@@ -316,8 +387,8 @@ mod tests {
 
     #[test]
     fn upsert_replaces_existing_block() {
-        let v1 = render("foo", "0.1.0", None, &[], "old-body");
-        let v2 = render("foo", "0.2.0", None, &[], "new-body");
+        let v1 = render("foo", "0.1.0", None, None, &[], "old-body");
+        let v2 = render("foo", "0.2.0", None, None, &[], "new-body");
         let doc = format!("default:\n    @echo hi\n\n{}", v1);
         let updated = upsert(&doc, "foo", &v2).unwrap();
         assert!(updated.contains("new-body"));
@@ -327,7 +398,7 @@ mod tests {
 
     #[test]
     fn append_to_empty_doc() {
-        let block = render("foo", "0.1.0", None, &[], "bar:\n    @echo");
+        let block = render("foo", "0.1.0", None, None, &[], "bar:\n    @echo");
         let out = append("", &block);
         assert_eq!(out, block);
     }
