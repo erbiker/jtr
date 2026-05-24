@@ -20,6 +20,7 @@ You need:
 
 - **Rust 1.95 or newer** (install via [rustup](https://rustup.rs)).
 - **[`just`](https://github.com/casey/just)** — this project's own build commands run through `just`. Install via `brew install just`, `cargo install just`, or your package manager.
+- **`cargo-deny`, `cargo-machete`, and `taplo`** — supply-chain and formatting checks that `just check` runs. Install via `brew install cargo-deny taplo && cargo install --locked cargo-machete`, or skip if you only plan to run pieces of `check` individually (CI catches the same things on your PR).
 
 ```sh
 git clone https://github.com/erbiker/jtr
@@ -31,12 +32,12 @@ just --list    # see available project commands
 ## The development loop
 
 ```sh
-just check       # cargo fmt --check + cargo clippy + cargo test (the full quality gate)
+just check       # fmt + clippy + taplo + machete + deny + test (the full quality gate)
 just smoke       # end-to-end install/list/remove against the bundled sample index
 just validate-index   # confirm every recipe in jtr-index/ produces valid just syntax
 ```
 
-`just check` is what CI runs. If it passes locally, your PR should pass CI.
+`just check` is what CI runs. If it passes locally, your PR should pass CI. The dep-audit pieces (`cargo deny check` in particular) need network to fetch the RustSec advisory database — if you're offline, the rest of `check` still runs offline-friendly.
 
 When iterating, you can run pieces individually:
 
@@ -45,6 +46,9 @@ cargo test                                          # unit + integration tests
 cargo test --test cli install_appends               # a specific integration test
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all
+just taplo-fmt                                      # auto-format Cargo.toml + deny.toml
+just deny                                           # licenses + advisories + duplicates
+just machete                                        # unused dependency detector
 ```
 
 ## Submitting a pull request

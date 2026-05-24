@@ -29,8 +29,25 @@ fmt-check:
 lint:
     cargo clippy --all-targets --all-features -- -D warnings
 
+# Verify TOML files (Cargo.toml, deny.toml) are taplo-formatted.
+taplo-check:
+    taplo fmt --check
+
+# Auto-format every TOML file via taplo.
+taplo-fmt:
+    taplo fmt
+
+# Detect unused dependencies in Cargo.toml.
+machete:
+    cargo machete
+
+# Audit dependencies: licenses, security advisories, banned crates, duplicate
+# versions, unknown registries. Requires network (fetches RustSec advisories).
+deny:
+    cargo deny check
+
 # The full quality gate. Sessions must run this before declaring done.
-check: fmt-check lint test
+check: fmt-check lint taplo-check machete deny test
 
 # End-to-end smoke test against the bundled sample index in a throwaway tempdir.
 smoke: build
