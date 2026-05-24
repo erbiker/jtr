@@ -79,3 +79,6 @@ jobs:
 
       - name: taplo fmt --check
         run: taplo fmt --check
+
+      - name: cargo publish --dry-run --locked
+        run: cargo publish --dry-run --locked

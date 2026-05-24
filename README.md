@@ -39,9 +39,32 @@ cargo install --path .
 
 Requires Rust 1.95 or newer.
 
-### From crates.io / Homebrew / GitHub Releases
+### From crates.io
 
-Coming with the first tagged release. Track [issue #1](https://github.com/erbiker/jtr/issues/1) for distribution updates.
+```sh
+cargo install jtr
+```
+
+### From GitHub Releases (prebuilt binary)
+
+Grab a tarball/zip from the [latest release](https://github.com/erbiker/jtr/releases/latest) for your platform (Linux x86_64, macOS arm64, macOS x86_64, Windows x86_64), verify it against the included `SHA256SUMS`, extract, and drop `jtr` onto your `PATH`:
+
+```sh
+# example: macOS arm64 — adjust VERSION + TARGET for your platform
+VERSION=0.1.0
+TARGET=aarch64-apple-darwin
+ARCHIVE=jtr-${VERSION}-${TARGET}.tar.gz
+BASE=https://github.com/erbiker/jtr/releases/download/v${VERSION}
+
+curl -fLO "${BASE}/${ARCHIVE}"
+curl -fL "${BASE}/SHA256SUMS" | grep "${ARCHIVE}" | shasum -a 256 -c -
+tar -xzf "${ARCHIVE}"
+mv "jtr-${VERSION}-${TARGET}/jtr" ~/.local/bin/   # or anywhere on PATH
+```
+
+### From Homebrew
+
+Not yet — deferred until v1.0. Use `cargo install jtr` or a release binary in the meantime.
 
 ## Usage
 

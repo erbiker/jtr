@@ -121,6 +121,45 @@ After adding or editing **any** manifest, run `just rehash` (or `scripts/recompu
 
 `cargo clippy -D warnings` is the binding style check — if Clippy is happy, your code is in the right shape.
 
+## Cutting a release
+
+> Maintainer-only. Skim this if you're working on the release pipeline; skip it otherwise.
+
+Releases are tag-driven. Pushing a `v<x.y.z>` tag triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which runs the full quality gate, builds release binaries for Linux / macOS (arm64 + x86_64) / Windows, and attaches them — plus a combined `SHA256SUMS` — to a GitHub release. The release notes come from the matching `## [<x.y.z>]` section in [CHANGELOG.md](CHANGELOG.md), so make sure the section exists before tagging.
+
+Publishing to crates.io is **not** automated. The workflow runs `cargo publish --dry-run --locked` as a gating step so packaging breakage surfaces during the release run, but the actual push is a deliberate, manual step from the maintainer's machine. crates.io versions are irreversible — you can yank but not delete — and that bar is too high for a workflow to clear unattended.
+
+The procedure:
+
+```sh
+# 1. Make sure main is clean and `just check` is green.
+git checkout main && git pull
+just check
+
+# 2. Bump the version in Cargo.toml. Update Cargo.lock by running any cargo command:
+cargo build
+# `package.version` in Cargo.toml + the `[[package]]` entry in Cargo.lock both move.
+
+# 3. Move CHANGELOG.md's `## [Unreleased]` entries into a new dated section, e.g.
+#    `## [0.2.0] — 2026-06-15`. Leave a fresh empty [Unreleased] placeholder above it.
+
+# 4. Commit + open a PR ("release: v0.2.0"). Merge after CI is green.
+
+# 5. From main after merge, tag and push:
+git checkout main && git pull
+git tag -a v0.2.0 -m "v0.2.0"
+git push origin v0.2.0
+
+# 6. Wait for the release workflow to finish (binaries appear under the GitHub release).
+#    The workflow also re-runs `cargo publish --dry-run --locked`; if that step fails,
+#    fix forward (don't push to crates.io until the workflow is green).
+
+# 7. From your local clone, publish to crates.io:
+cargo publish --locked
+```
+
+The tag-matching check inside the workflow refuses to release if the tag doesn't match `Cargo.toml`'s `version`, so a stale-tag mistake fails fast before binaries are built.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same dual MIT OR Apache-2.0 terms as the rest of the project. See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
