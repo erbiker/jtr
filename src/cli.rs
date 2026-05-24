@@ -42,7 +42,12 @@ pub enum Command {
         name: String,
     },
     /// Remove a previously installed recipe.
-    Remove { name: String },
+    Remove {
+        name: String,
+        /// Remove even when other installed recipes declare this one as a dependency.
+        #[arg(long)]
+        force: bool,
+    },
     /// Re-fetch one or more installed recipes and replace their managed block
     /// if the registry has a newer version (or if the block has drifted).
     Update {
@@ -77,7 +82,9 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Install { name } => {
             commands::install::run(&index_url, &name, file_override.as_deref())
         }
-        Command::Remove { name } => commands::remove::run(&name, file_override.as_deref()),
+        Command::Remove { name, force } => {
+            commands::remove::run(&name, force, file_override.as_deref())
+        }
         Command::Update { name } => {
             commands::update::run(&index_url, name.as_deref(), file_override.as_deref())
         }

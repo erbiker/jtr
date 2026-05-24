@@ -7,6 +7,7 @@ use anyhow::{Result, anyhow, bail};
 /// ```text
 /// # >>> jtr:<name>@<version> >>>
 /// # source: <homepage_or_index>
+/// # depends-on: <name>, <name>          (omitted when empty)
 /// # do not edit manually; use `jtr update <name>` or `jtr remove <name>`
 /// <snippet>
 /// # <<< jtr:<name> <<<
@@ -17,6 +18,9 @@ pub struct ManagedBlock {
     /// Recipe text between the sentinels. Read by future `jtr update`/`jtr show` commands.
     #[allow(dead_code)]
     pub body: String,
+    /// Names of recipes this block declares as dependencies. Recorded inline so
+    /// `jtr remove` can compute reverse-deps without hitting the network.
+    pub dependencies: Vec<String>,
 }
 
 pub fn open_marker(name: &str) -> String {
@@ -27,20 +31,33 @@ pub fn close_marker(name: &str) -> String {
     format!("# <<< jtr:{name} <<<", name = name)
 }
 
-pub fn render(name: &str, version: &str, source: Option<&str>, snippet: &str) -> String {
+pub fn render(
+    name: &str,
+    version: &str,
+    source: Option<&str>,
+    dependencies: &[String],
+    snippet: &str,
+) -> String {
     let source_line = source
         .map(|s| format!("# source: {s}\n", s = s))
         .unwrap_or_default();
+    let depends_line = if dependencies.is_empty() {
+        String::new()
+    } else {
+        format!("# depends-on: {}\n", dependencies.join(", "))
+    };
     let trimmed = snippet.trim_end_matches('\n');
     format!(
         "# >>> jtr:{name}@{version} >>>\n\
          {source_line}\
+         {depends_line}\
          # do not edit manually; use `jtr update {name}` or `jtr remove {name}`\n\
          {body}\n\
          # <<< jtr:{name} <<<\n",
         name = name,
         version = version,
         source_line = source_line,
+        depends_line = depends_line,
         body = trimmed,
     )
 }
@@ -63,11 +80,13 @@ pub fn parse_all(doc: &str) -> Vec<ManagedBlock> {
                 body_lines.push(inner.to_string());
             }
             if found_close {
+                let dependencies = parse_dependencies(&body_lines);
                 let body = strip_internal_header(&body_lines).join("\n");
                 out.push(ManagedBlock {
                     name,
                     version,
                     body,
+                    dependencies,
                 });
             }
         }
@@ -176,16 +195,36 @@ fn parse_open(line: &str) -> Option<(String, String)> {
 }
 
 fn strip_internal_header(lines: &[String]) -> Vec<String> {
-    // Drop leading "# source:" and "# do not edit" lines that we wrote ourselves so callers
-    // see just the recipe body.
+    // Drop leading "# source:", "# depends-on:", and "# do not edit" lines that we wrote
+    // ourselves so callers see just the recipe body.
     lines
         .iter()
         .skip_while(|l| {
             let t = l.trim_start();
-            t.starts_with("# source:") || t.starts_with("# do not edit")
+            t.starts_with("# source:")
+                || t.starts_with("# depends-on:")
+                || t.starts_with("# do not edit")
         })
         .cloned()
         .collect()
+}
+
+fn parse_dependencies(lines: &[String]) -> Vec<String> {
+    for line in lines {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("# depends-on:") {
+            return rest
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        // Only scan the header — once we hit a non-header line, stop.
+        if !t.starts_with("# source:") && !t.starts_with("# do not edit") && !t.is_empty() {
+            break;
+        }
+    }
+    Vec::new()
 }
 
 /// Convenience: confirm a string looks like a valid recipe name.
@@ -215,6 +254,7 @@ mod tests {
             "postgres-dev",
             "0.1.0",
             Some("https://example.com"),
+            &[],
             "pg-up:\n    docker run ...\n",
         );
         let doc = format!("default:\n    @echo hi\n\n{}", block);
@@ -224,11 +264,37 @@ mod tests {
         assert_eq!(parsed[0].version, "0.1.0");
         assert!(parsed[0].body.contains("pg-up:"));
         assert!(parsed[0].body.contains("docker run"));
+        assert!(parsed[0].dependencies.is_empty());
+    }
+
+    #[test]
+    fn render_and_parse_roundtrip_with_dependencies() {
+        let deps = vec!["clean".to_string(), "alice/recipes/foo".to_string()];
+        let block = render(
+            "fancy-build",
+            "0.2.0",
+            Some("https://example.com"),
+            &deps,
+            "fancy:\n    @echo hi\n",
+        );
+        // The depends-on line is in the rendered output, but stripped from body.
+        assert!(block.contains("# depends-on: clean, alice/recipes/foo"));
+
+        let parsed = parse_all(&block);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].dependencies, deps);
+        assert!(!parsed[0].body.contains("depends-on"));
+    }
+
+    #[test]
+    fn render_omits_depends_line_when_empty() {
+        let block = render("foo", "0.1.0", None, &[], "bar:\n    @echo hi\n");
+        assert!(!block.contains("# depends-on:"));
     }
 
     #[test]
     fn remove_strips_block_and_collapses_blanks() {
-        let block = render("foo", "0.1.0", None, "bar:\n    @echo hi\n");
+        let block = render("foo", "0.1.0", None, &[], "bar:\n    @echo hi\n");
         let doc = format!("first:\n    @echo a\n\n{}\nlast:\n    @echo b\n", block);
         let (out, removed) = remove(&doc, "foo");
         assert!(removed);
@@ -242,7 +308,7 @@ mod tests {
 
     #[test]
     fn remove_trailing_block_does_not_leave_blank_tail() {
-        let block = render("foo", "0.1.0", None, "bar:\n    @echo hi");
+        let block = render("foo", "0.1.0", None, &[], "bar:\n    @echo hi");
         let doc = format!("default:\n    @echo a\n\n{}", block);
         let (out, _) = remove(&doc, "foo");
         assert!(out.ends_with("@echo a\n"));
@@ -250,8 +316,8 @@ mod tests {
 
     #[test]
     fn upsert_replaces_existing_block() {
-        let v1 = render("foo", "0.1.0", None, "old-body");
-        let v2 = render("foo", "0.2.0", None, "new-body");
+        let v1 = render("foo", "0.1.0", None, &[], "old-body");
+        let v2 = render("foo", "0.2.0", None, &[], "new-body");
         let doc = format!("default:\n    @echo hi\n\n{}", v1);
         let updated = upsert(&doc, "foo", &v2).unwrap();
         assert!(updated.contains("new-body"));
@@ -261,7 +327,7 @@ mod tests {
 
     #[test]
     fn append_to_empty_doc() {
-        let block = render("foo", "0.1.0", None, "bar:\n    @echo");
+        let block = render("foo", "0.1.0", None, &[], "bar:\n    @echo");
         let out = append("", &block);
         assert_eq!(out, block);
     }

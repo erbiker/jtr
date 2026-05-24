@@ -995,6 +995,319 @@ fn doctor_treats_tap_block_as_first_class() {
         .stdout(str::contains("all checks passed"));
 }
 
+/// Build a multi-recipe temp index where each recipe can declare dependencies on
+/// other recipes in the same index. `recipes` is a slice of `(name, version, deps)`.
+fn write_dep_index(dir: &Path, recipes: &[(&str, &str, &[&str])]) -> String {
+    let recipes_dir = dir.join("recipes");
+    fs::create_dir_all(&recipes_dir).unwrap();
+
+    let mut index_entries = Vec::new();
+    for (name, version, deps) in recipes {
+        let deps_json = deps
+            .iter()
+            .map(|d| format!("\"{}\"", d))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let manifest = format!(
+            r#"{{
+  "name": "{name}",
+  "version": "{version}",
+  "description": "dep fixture {name}",
+  "dependencies": [{deps_json}],
+  "targets": {{
+    "just": {{
+      "snippet": "{name}-noop:\n    @echo {name}\n"
+    }}
+  }}
+}}"#
+        );
+        fs::write(recipes_dir.join(format!("{name}.json")), &manifest).unwrap();
+        let sha = sha256_hex(manifest.as_bytes());
+        index_entries.push(format!(
+            r#"    {{
+      "name": "{name}",
+      "version": "{version}",
+      "description": "dep fixture {name}",
+      "manifest_url": "recipes/{name}.json",
+      "targets": ["just"],
+      "sha256": "{sha}"
+    }}"#
+        ));
+    }
+
+    let index = format!(
+        r#"{{
+  "version": 1,
+  "recipes": [
+{}
+  ]
+}}"#,
+        index_entries.join(",\n")
+    );
+    fs::write(dir.join("index.json"), index).unwrap();
+    format!("file://{}/index.json", dir.display())
+}
+
+#[test]
+fn install_pulls_in_transitive_dependencies() {
+    // A depends on B; installing A must install B first and then A.
+    let registry_dir = TempDir::new().unwrap();
+    let index = write_dep_index(
+        registry_dir.path(),
+        &[("a", "0.1.0", &["b"]), ("b", "0.1.0", &[])],
+    );
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    let assert = jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["install", "a"])
+        .assert()
+        .success()
+        .stdout(str::contains("installed").count(2))
+        .stdout(str::contains("(dependency)"));
+
+    let body = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(body.contains("# >>> jtr:b@0.1.0 >>>"));
+    assert!(body.contains("# >>> jtr:a@0.1.0 >>>"));
+    // The dependency block must appear before the dependent's block.
+    let pos_b = body.find("# >>> jtr:b@").unwrap();
+    let pos_a = body.find("# >>> jtr:a@").unwrap();
+    assert!(
+        pos_b < pos_a,
+        "dependency b should be installed before dependent a"
+    );
+    // The dependent's depends-on line is recorded in the block header.
+    assert!(body.contains("# depends-on: b"));
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("(dependency)"),
+        "transitive install should be labeled (dependency):\n{stdout}"
+    );
+}
+
+#[test]
+fn install_resolves_diamond_dependencies_without_duplicating() {
+    // A → B, A → C, B → D, C → D — install A and D must appear exactly once.
+    let registry_dir = TempDir::new().unwrap();
+    let index = write_dep_index(
+        registry_dir.path(),
+        &[
+            ("a", "0.1.0", &["b", "c"]),
+            ("b", "0.1.0", &["d"]),
+            ("c", "0.1.0", &["d"]),
+            ("d", "0.1.0", &[]),
+        ],
+    );
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["install", "a"])
+        .assert()
+        .success();
+
+    let body = fs::read_to_string(project.path().join("justfile")).unwrap();
+    let occurrences = body.matches("# >>> jtr:d@").count();
+    assert_eq!(occurrences, 1, "d should be installed exactly once");
+    for n in ["a", "b", "c", "d"] {
+        assert!(
+            body.contains(&format!("# >>> jtr:{n}@0.1.0 >>>")),
+            "{n} missing from {body}"
+        );
+    }
+}
+
+#[test]
+fn install_errors_on_cycle_with_both_endpoints_in_message() {
+    // A → B → A is a cycle. The error must name both endpoints so the user can fix it.
+    let registry_dir = TempDir::new().unwrap();
+    let index = write_dep_index(
+        registry_dir.path(),
+        &[("a", "0.1.0", &["b"]), ("b", "0.1.0", &["a"])],
+    );
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["install", "a"])
+        .assert()
+        .failure()
+        .stderr(str::contains("cycle"))
+        .stderr(str::contains("a"))
+        .stderr(str::contains("b"));
+}
+
+#[test]
+fn install_errors_on_self_loop() {
+    let registry_dir = TempDir::new().unwrap();
+    let index = write_dep_index(registry_dir.path(), &[("looper", "0.1.0", &["looper"])]);
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["install", "looper"])
+        .assert()
+        .failure()
+        .stderr(str::contains("cycle"))
+        .stderr(str::contains("looper"));
+}
+
+#[test]
+fn install_dep_already_present_is_idempotent() {
+    // If the user has manually installed B, then installs A which depends on B, B
+    // must not be duplicated and the install should still succeed.
+    let registry_dir = TempDir::new().unwrap();
+    let index = write_dep_index(
+        registry_dir.path(),
+        &[("a", "0.1.0", &["b"]), ("b", "0.1.0", &[])],
+    );
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["install", "b"])
+        .assert()
+        .success();
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["install", "a"])
+        .assert()
+        .success();
+
+    let body = fs::read_to_string(project.path().join("justfile")).unwrap();
+    let b_count = body.matches("# >>> jtr:b@").count();
+    assert_eq!(
+        b_count, 1,
+        "b should appear exactly once after a was installed"
+    );
+    assert!(body.contains("# >>> jtr:a@"));
+}
+
+#[test]
+fn install_tap_recipe_with_curated_dependency_resolves_cross_source() {
+    // A tap recipe declares a dep on a curated recipe — resolution must cross source boundaries.
+    let registry_dir = TempDir::new().unwrap();
+    let curated = write_dep_index(registry_dir.path(), &[("base", "0.1.0", &[])]);
+
+    let tap_dir = TempDir::new().unwrap();
+    let tap_index = write_dep_index(tap_dir.path(), &[("downstream", "0.1.0", &["base"])]);
+
+    let config_dir = TempDir::new().unwrap();
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "add", "alice/recipes", "--url", &tap_index])
+        .assert()
+        .success();
+
+    let project = project_with_justfile("default:\n    @echo hi\n");
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &curated)
+        .args(["install", "alice/recipes/downstream"])
+        .assert()
+        .success();
+
+    let body = fs::read_to_string(project.path().join("justfile")).unwrap();
+    // Curated dep is written by its bare name; tap dependent uses its tap-prefixed block name.
+    assert!(body.contains("# >>> jtr:base@0.1.0 >>>"));
+    assert!(body.contains("# >>> jtr:alice/recipes/downstream@0.1.0 >>>"));
+}
+
+#[test]
+fn install_errors_when_dep_references_unconfigured_tap() {
+    // A curated recipe declares a dep on a tap-qualified name whose tap isn't configured.
+    // The error must name the missing tap and point the user at `jtr tap add`.
+    let registry_dir = TempDir::new().unwrap();
+    let index = write_dep_index(
+        registry_dir.path(),
+        &[("needs-ext", "0.1.0", &["ghost/repo/missing"])],
+    );
+    let config_dir = TempDir::new().unwrap();
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["install", "needs-ext"])
+        .assert()
+        .failure()
+        .stderr(str::contains("ghost/repo"))
+        .stderr(str::contains("not configured"))
+        .stderr(str::contains("jtr tap add"));
+}
+
+#[test]
+fn remove_blocks_when_dependents_are_installed() {
+    let registry_dir = TempDir::new().unwrap();
+    let index = write_dep_index(
+        registry_dir.path(),
+        &[("a", "0.1.0", &["b"]), ("b", "0.1.0", &[])],
+    );
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["install", "a"])
+        .assert()
+        .success();
+
+    jtr()
+        .current_dir(project.path())
+        .args(["remove", "b"])
+        .assert()
+        .failure()
+        .stderr(str::contains("depend"))
+        .stderr(str::contains("a"))
+        .stderr(str::contains("--force"));
+
+    // Justfile is unchanged.
+    let body = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(body.contains("# >>> jtr:b@"));
+    assert!(body.contains("# >>> jtr:a@"));
+}
+
+#[test]
+fn remove_force_proceeds_despite_dependents() {
+    let registry_dir = TempDir::new().unwrap();
+    let index = write_dep_index(
+        registry_dir.path(),
+        &[("a", "0.1.0", &["b"]), ("b", "0.1.0", &[])],
+    );
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["install", "a"])
+        .assert()
+        .success();
+
+    jtr()
+        .current_dir(project.path())
+        .args(["remove", "b", "--force"])
+        .assert()
+        .success()
+        .stdout(str::contains("removed"));
+
+    let body = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(
+        !body.contains("# >>> jtr:b@"),
+        "b should be gone after --force"
+    );
+    assert!(body.contains("# >>> jtr:a@"), "a should remain");
+}
+
 #[test]
 fn install_into_taskfile_errors_because_no_seed_supports_task_yet() {
     // Seed recipes only declare a `just` target today. Installing into a Taskfile.yml

@@ -35,6 +35,11 @@ pub struct RecipeManifest {
     pub maintainer: Option<String>,
     #[serde(default)]
     pub shells_out_to: Vec<String>,
+    /// Other recipes that must be installed alongside this one. Bare names
+    /// resolve to the curated index; `user/repo/recipe` names resolve to the
+    /// named tap (which must be configured via `jtr tap add`).
+    #[serde(default)]
+    pub dependencies: Vec<String>,
     pub targets: BTreeMap<String, RecipeTarget>,
 }
 
