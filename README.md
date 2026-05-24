@@ -117,6 +117,24 @@ jtr update                 # update every jtr-managed recipe in this project
 
 `jtr update` is byte-identical no-op when the registry version matches what's installed and the managed block is unchanged. If you hand-edited the managed block, `jtr update` reverts it to canonical (`✓ refreshed postgres-dev @0.1.0`).
 
+### Pin to a specific version
+
+For reproducible setups across machines or CI runs, pin an install with `@<version>`:
+
+```sh
+jtr install postgres-dev@0.1.0
+```
+
+The managed block records the pin (`# pinned: 0.1.0`); `jtr update postgres-dev` then refuses to bump the block. To bump it later, either:
+
+```sh
+jtr update postgres-dev --unpin   # bump to the latest, drop the pin
+jtr install postgres-dev          # bare install also overwrites the pin with latest
+jtr install postgres-dev@0.2.0    # or re-pin to a different version
+```
+
+If you ask for a version the registry doesn't publish, the error lists what _is_ available. Pinning a recipe doesn't pin its transitive dependencies — those continue to resolve to whatever the registry currently publishes. (A full lockfile is deliberately out of scope until users ask for one.)
+
 ### List and remove
 
 ```sh

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use colored::Colorize;
 
 use crate::index::Registry;
@@ -73,6 +73,44 @@ impl Sources {
         Ok(Self { sources })
     }
 
+    /// Locate a recipe at a specific version (or the latest, when `pin` is None).
+    /// Returns `Ok(None)` when the recipe itself isn't in any source — callers
+    /// own the "not found" diagnostic so they can distinguish unconfigured-tap
+    /// from typo. Returns `Err` when the recipe exists but the pinned version
+    /// isn't published; the error names the available versions.
+    pub fn find_at(
+        &self,
+        qualified: &str,
+        pin: Option<&str>,
+    ) -> Result<Option<(&Source, IndexEntry)>> {
+        let Some((source, top_entry)) = self.find(qualified) else {
+            return Ok(None);
+        };
+
+        let Some(version) = pin else {
+            return Ok(Some((source, top_entry.clone())));
+        };
+
+        if version == top_entry.version {
+            return Ok(Some((source, top_entry.clone())));
+        }
+
+        if let Some(v) = top_entry.versions.iter().find(|v| v.version == version) {
+            let mut entry = top_entry.clone();
+            entry.version = v.version.clone();
+            entry.manifest_url = v.manifest_url.clone();
+            entry.sha256 = v.sha256.clone();
+            return Ok(Some((source, entry)));
+        }
+
+        bail!(
+            "recipe '{}' has no published version '{}'. Available: {}",
+            qualified,
+            version,
+            available_versions(top_entry).join(", ")
+        );
+    }
+
     /// Locate a recipe by the name a user typed on the CLI, or by a managed
     /// block's `block.name`. Two forms are accepted:
     ///
@@ -103,6 +141,18 @@ impl Sources {
 
         None
     }
+}
+
+/// Every published version of `entry`, sorted lexicographically and deduped.
+/// Used to render "available: …" when a pinned install asks for a version that
+/// isn't published.
+pub fn available_versions(entry: &IndexEntry) -> Vec<String> {
+    let mut out: Vec<String> = std::iter::once(entry.version.clone())
+        .chain(entry.versions.iter().map(|v| v.version.clone()))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// The block name that `install` writes for a recipe from `source`. Curated

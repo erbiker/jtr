@@ -1308,6 +1308,364 @@ fn remove_force_proceeds_despite_dependents() {
     assert!(body.contains("# >>> jtr:a@"), "a should remain");
 }
 
+/// Build a multi-version index for one recipe. The first entry in `versions` is
+/// the "latest" (top-level fields); every entry is also enumerated under
+/// `versions: [...]` so the CLI can resolve pins to any of them. Each manifest's
+/// snippet embeds its own version as a marker so tests can assert which one
+/// landed on disk.
+fn write_multi_version_index(dir: &Path, recipe: &str, versions: &[&str]) -> String {
+    assert!(!versions.is_empty(), "need at least one version");
+    let recipes_dir = dir.join("recipes");
+    fs::create_dir_all(&recipes_dir).unwrap();
+
+    let mut version_entries: Vec<String> = Vec::new();
+    let mut latest_manifest_url = String::new();
+    let mut latest_sha = String::new();
+
+    for (idx, version) in versions.iter().enumerate() {
+        let manifest = format!(
+            r#"{{
+  "name": "{recipe}",
+  "version": "{version}",
+  "description": "fixture {recipe} v{version}",
+  "shells_out_to": [],
+  "targets": {{
+    "just": {{
+      "snippet": "{recipe}-noop:\n    @echo marker-{version}\n"
+    }}
+  }}
+}}"#
+        );
+        let path = if idx == 0 {
+            // Latest goes at the canonical path so an older CLI (no `versions:`) still works.
+            format!("{recipe}.json")
+        } else {
+            format!("{recipe}/{version}.json")
+        };
+        let on_disk = recipes_dir.join(&path);
+        fs::create_dir_all(on_disk.parent().unwrap()).unwrap();
+        fs::write(&on_disk, &manifest).unwrap();
+        let sha = sha256_hex(manifest.as_bytes());
+
+        if idx == 0 {
+            latest_manifest_url = format!("recipes/{path}");
+            latest_sha = sha.clone();
+        }
+
+        version_entries.push(format!(
+            r#"{{
+        "version": "{version}",
+        "manifest_url": "recipes/{path}",
+        "sha256": "{sha}"
+      }}"#
+        ));
+    }
+
+    let latest_version = versions[0];
+    let index = format!(
+        r#"{{
+  "version": 1,
+  "recipes": [
+    {{
+      "name": "{recipe}",
+      "version": "{latest_version}",
+      "description": "fixture {recipe}",
+      "manifest_url": "{latest_manifest_url}",
+      "targets": ["just"],
+      "sha256": "{latest_sha}",
+      "versions": [
+        {}
+      ]
+    }}
+  ]
+}}"#,
+        version_entries.join(",\n        ")
+    );
+    fs::write(dir.join("index.json"), index).unwrap();
+
+    format!("file://{}/index.json", dir.display())
+}
+
+#[test]
+fn install_with_pin_writes_the_requested_version() {
+    // Latest is 0.2.0 but the user asks for 0.1.0 — the older snippet (marker-0.1.0)
+    // must land on disk, the block must declare the pin, and the install output
+    // must call out that the install was pinned.
+    let index_dir = TempDir::new().unwrap();
+    let index_url = write_multi_version_index(index_dir.path(), "demo", &["0.2.0", "0.1.0"]);
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["install", "demo@0.1.0"])
+        .assert()
+        .success()
+        .stdout(str::contains("(pinned)"));
+
+    let body = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(
+        body.contains("# >>> jtr:demo@0.1.0 >>>"),
+        "block header should record the pinned version, got:\n{body}"
+    );
+    assert!(
+        body.contains("# pinned: 0.1.0"),
+        "block should record the pin marker, got:\n{body}"
+    );
+    assert!(
+        body.contains("marker-0.1.0"),
+        "the 0.1.0 manifest's snippet should be on disk, got:\n{body}"
+    );
+    assert!(
+        !body.contains("marker-0.2.0"),
+        "0.2.0 must not have been written, got:\n{body}"
+    );
+}
+
+#[test]
+fn install_with_pin_to_nonexistent_version_lists_available() {
+    let index_dir = TempDir::new().unwrap();
+    let index_url = write_multi_version_index(index_dir.path(), "demo", &["0.2.0", "0.1.0"]);
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    let assert = jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["install", "demo@9.9.9"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("no published version '9.9.9'"),
+        "error should name the missing version, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("0.1.0") && stderr.contains("0.2.0"),
+        "error should list available versions, got: {stderr}"
+    );
+
+    // No change to the justfile when the pin can't be satisfied.
+    let body = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert_eq!(body, "default:\n    @echo hi\n");
+}
+
+#[test]
+fn install_with_empty_version_after_at_errors() {
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    let assert = jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["install", "postgres-dev@"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("version is empty"),
+        "stderr should explain the empty pin, got: {stderr}"
+    );
+}
+
+#[test]
+fn install_with_pin_on_index_without_versions_array_is_backwards_compatible() {
+    // An old-style index that only lists a single version (no `versions: [...]`) must
+    // still let users pin to that one version — the CLI falls back to the top-level
+    // `version` field when matching the pin.
+    let dir = TempDir::new().unwrap();
+    let index_url = write_postgres_dev_index(dir.path(), "0.1.0");
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["install", "postgres-dev@0.1.0"])
+        .assert()
+        .success();
+    let body = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(body.contains("# pinned: 0.1.0"));
+
+    // ...but pinning to a non-published version should still produce a useful error,
+    // even when there's only one entry to list.
+    let project2 = project_with_justfile("default:\n    @echo hi\n");
+    let assert = jtr()
+        .current_dir(project2.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["install", "postgres-dev@9.9.9"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("0.1.0"),
+        "available list should include the lone top-level version, got: {stderr}"
+    );
+}
+
+#[test]
+fn update_skips_pinned_blocks_by_default() {
+    let index_dir = TempDir::new().unwrap();
+    let index_url = write_multi_version_index(index_dir.path(), "demo", &["0.2.0", "0.1.0"]);
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["install", "demo@0.1.0"])
+        .assert()
+        .success();
+
+    // The pin is in place; `jtr update` (no --unpin) should refuse to bump it.
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["update", "demo"])
+        .assert()
+        .success()
+        .stdout(str::contains("pinned to 0.1.0"))
+        .stdout(str::contains("--unpin"));
+
+    let body = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(
+        body.contains("# pinned: 0.1.0"),
+        "pin must still be present after `jtr update`, got:\n{body}"
+    );
+    assert!(
+        body.contains("marker-0.1.0"),
+        "0.1.0 snippet must still be on disk, got:\n{body}"
+    );
+    assert!(
+        !body.contains("marker-0.2.0"),
+        "update must not have bumped the block, got:\n{body}"
+    );
+}
+
+#[test]
+fn update_unpin_bumps_to_latest_and_drops_marker() {
+    let index_dir = TempDir::new().unwrap();
+    let index_url = write_multi_version_index(index_dir.path(), "demo", &["0.2.0", "0.1.0"]);
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["install", "demo@0.1.0"])
+        .assert()
+        .success();
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["update", "demo", "--unpin"])
+        .assert()
+        .success()
+        .stdout(str::contains("unpinned"));
+
+    let body = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(
+        body.contains("# >>> jtr:demo@0.2.0 >>>"),
+        "block should be on the new latest, got:\n{body}"
+    );
+    assert!(
+        !body.contains("# pinned:"),
+        "pin marker should be stripped after --unpin, got:\n{body}"
+    );
+    assert!(body.contains("marker-0.2.0"));
+}
+
+#[test]
+fn bare_install_overrides_an_existing_pin() {
+    // The user can also re-pin or unpin by re-running install. A bare `jtr install demo`
+    // overwrites the pinned block with the latest, unpinned.
+    let index_dir = TempDir::new().unwrap();
+    let index_url = write_multi_version_index(index_dir.path(), "demo", &["0.2.0", "0.1.0"]);
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["install", "demo@0.1.0"])
+        .assert()
+        .success();
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["install", "demo"])
+        .assert()
+        .success();
+
+    let body = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(body.contains("# >>> jtr:demo@0.2.0 >>>"));
+    assert!(
+        !body.contains("# pinned:"),
+        "bare install should drop the pin marker, got:\n{body}"
+    );
+}
+
+#[test]
+fn doctor_treats_pinned_blocks_at_their_pin_as_healthy() {
+    let index_dir = TempDir::new().unwrap();
+    let index_url = write_multi_version_index(index_dir.path(), "demo", &["0.2.0", "0.1.0"]);
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["install", "demo@0.1.0"])
+        .assert()
+        .success();
+
+    let assert = jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["doctor"])
+        .assert()
+        .success()
+        .stdout(str::contains("pinned, up to date"))
+        .stdout(str::contains("all checks passed"));
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        !stdout.contains("newer version available"),
+        "doctor must not flag drift on a pinned block at its pinned version, got: {stdout}"
+    );
+}
+
+#[test]
+fn doctor_flags_pinned_version_no_longer_published() {
+    // Install at 0.1.0, then drop 0.1.0 from the index entirely — doctor should
+    // surface this loudly with the available list.
+    let index_dir = TempDir::new().unwrap();
+    let index_url = write_multi_version_index(index_dir.path(), "demo", &["0.2.0", "0.1.0"]);
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["install", "demo@0.1.0"])
+        .assert()
+        .success();
+
+    // Rewrite the index so 0.1.0 disappears: only 0.2.0 is now published.
+    write_multi_version_index(index_dir.path(), "demo", &["0.2.0"]);
+
+    let assert = jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["doctor"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let combined = format!("{stdout}\n{stderr}");
+    assert!(
+        combined.contains("pinned to 0.1.0 but no longer published"),
+        "doctor should call out unpublished pins, got: {combined}"
+    );
+    assert!(
+        combined.contains("0.2.0"),
+        "available list should include 0.2.0, got: {combined}"
+    );
+}
+
 #[test]
 fn install_into_taskfile_errors_because_no_seed_supports_task_yet() {
     // Seed recipes only declare a `just` target today. Installing into a Taskfile.yml

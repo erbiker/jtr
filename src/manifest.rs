@@ -22,6 +22,19 @@ pub struct IndexEntry {
     /// during the v1 rollout; once present, the fetched manifest must match.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// Every published version of this recipe. When absent, only the
+    /// top-level `version` is installable — older CLIs and pre-pinning
+    /// indices keep working unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<VersionEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionEntry {
+    pub version: String,
+    pub manifest_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

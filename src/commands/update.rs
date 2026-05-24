@@ -1,11 +1,16 @@
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 
-use crate::managed;
+use crate::managed::{self, ManagedBlock};
 use crate::sources::Sources;
 use crate::target;
 
-pub fn run(index_url: &str, name: Option<&str>, file_override: Option<&str>) -> Result<()> {
+pub fn run(
+    index_url: &str,
+    name: Option<&str>,
+    unpin: bool,
+    file_override: Option<&str>,
+) -> Result<()> {
     let (path, target) = target::resolve(file_override)?;
     let existing = std::fs::read_to_string(&path)
         .with_context(|| format!("could not read {}", path.display()))?;
@@ -40,88 +45,140 @@ pub fn run(index_url: &str, name: Option<&str>, file_override: Option<&str>) -> 
     let mut wrote_anything = false;
 
     for block_name in &names_to_update {
-        let installed_version = blocks
+        let block = blocks
             .iter()
             .find(|b| &b.name == block_name)
-            .map(|b| b.version.clone())
             .expect("name came from blocks above");
 
-        let Some((source, entry)) = sources.find(block_name) else {
-            println!(
-                "{} {} {} no longer in registry — use `jtr remove {}` to clean up",
-                "!".yellow(),
-                block_name.bold(),
-                "—".dimmed(),
-                block_name
-            );
-            continue;
-        };
-
-        let manifest = source.registry.load_manifest(entry)?;
-
-        let target_key = target.as_str();
-        let target_recipe = manifest.targets.get(target_key).ok_or_else(|| {
-            anyhow::anyhow!(
-                "recipe '{}' does not support target '{}' (supports: {})",
-                block_name,
-                target_key,
-                manifest
-                    .targets
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })?;
-
-        let source_link = manifest
-            .homepage
-            .clone()
-            .unwrap_or_else(|| source.registry.base().to_string());
-
-        let rendered = managed::render(
-            block_name,
-            &manifest.version,
-            Some(&source_link),
-            &manifest.dependencies,
-            &target_recipe.snippet,
-        );
-
-        let new_doc = managed::upsert(&current_doc, block_name, &rendered)?;
-
-        if new_doc == current_doc {
-            println!(
-                "{} {} {} already at version {}",
-                "✓".green(),
-                block_name.bold(),
-                "—".dimmed(),
-                manifest.version
-            );
-        } else if installed_version != manifest.version {
-            println!(
-                "{} updated {} {} → {}",
-                "✓".green(),
-                block_name.bold(),
-                format!("@{}", installed_version).dimmed(),
-                manifest.version
-            );
-            current_doc = new_doc;
-            wrote_anything = true;
-        } else {
-            println!(
-                "{} refreshed {} {} (reverted manual edits to managed block)",
-                "✓".green(),
-                block_name.bold(),
-                format!("@{}", manifest.version).dimmed()
-            );
-            current_doc = new_doc;
-            wrote_anything = true;
-        }
+        update_one(
+            &sources,
+            block,
+            target.as_str(),
+            unpin,
+            &mut current_doc,
+            &mut wrote_anything,
+        )?;
     }
 
     if wrote_anything {
         std::fs::write(&path, &current_doc)
             .with_context(|| format!("could not write {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+fn update_one(
+    sources: &Sources,
+    block: &ManagedBlock,
+    target_key: &str,
+    unpin: bool,
+    current_doc: &mut String,
+    wrote_anything: &mut bool,
+) -> Result<()> {
+    let block_name = &block.name;
+
+    // Pinned blocks are managed by `jtr install <name>@<version>`, not `jtr update`.
+    // The user has explicitly asked for a specific version, so silently refreshing
+    // them would defeat the pin. `--unpin` flips them back into the normal update
+    // flow and drops the pin marker.
+    if let Some(pin) = &block.pinned
+        && !unpin
+    {
+        println!(
+            "{} {} {} pinned to {} — skipping (use `jtr update {} --unpin` to bump, or `jtr install {}` for latest)",
+            "i".cyan(),
+            block_name.bold(),
+            "—".dimmed(),
+            pin.bold(),
+            block_name,
+            block_name
+        );
+        return Ok(());
+    }
+
+    let Some((source, entry)) = sources.find(block_name) else {
+        println!(
+            "{} {} {} no longer in registry — use `jtr remove {}` to clean up",
+            "!".yellow(),
+            block_name.bold(),
+            "—".dimmed(),
+            block_name
+        );
+        return Ok(());
+    };
+
+    let manifest = source.registry.load_manifest(entry)?;
+
+    let target_recipe = manifest.targets.get(target_key).ok_or_else(|| {
+        anyhow::anyhow!(
+            "recipe '{}' does not support target '{}' (supports: {})",
+            block_name,
+            target_key,
+            manifest
+                .targets
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+
+    let source_link = manifest
+        .homepage
+        .clone()
+        .unwrap_or_else(|| source.registry.base().to_string());
+
+    // `--unpin` drops the pin marker; otherwise an unpinned block stays unpinned.
+    let rendered = managed::render(
+        block_name,
+        &manifest.version,
+        Some(&source_link),
+        None,
+        &manifest.dependencies,
+        &target_recipe.snippet,
+    );
+
+    let new_doc = managed::upsert(current_doc, block_name, &rendered)?;
+
+    let was_pinned = block.pinned.is_some();
+    if new_doc == *current_doc {
+        println!(
+            "{} {} {} already at version {}",
+            "✓".green(),
+            block_name.bold(),
+            "—".dimmed(),
+            manifest.version
+        );
+    } else if was_pinned {
+        println!(
+            "{} unpinned {} {} → {}",
+            "✓".green(),
+            block_name.bold(),
+            format!("@{} (pinned)", block.version).dimmed(),
+            manifest.version
+        );
+        *current_doc = new_doc;
+        *wrote_anything = true;
+    } else if block.version != manifest.version {
+        println!(
+            "{} updated {} {} → {}",
+            "✓".green(),
+            block_name.bold(),
+            format!("@{}", block.version).dimmed(),
+            manifest.version
+        );
+        *current_doc = new_doc;
+        *wrote_anything = true;
+    } else {
+        println!(
+            "{} refreshed {} {} (reverted manual edits to managed block)",
+            "✓".green(),
+            block_name.bold(),
+            format!("@{}", manifest.version).dimmed()
+        );
+        *current_doc = new_doc;
+        *wrote_anything = true;
     }
 
     Ok(())

@@ -3,7 +3,7 @@ use colored::Colorize;
 use std::path::{Path, PathBuf};
 
 use crate::managed::{self, ManagedBlock};
-use crate::sources::Sources;
+use crate::sources::{Sources, available_versions};
 use crate::target;
 
 pub fn run(index_url: &str, file_override: Option<&str>) -> Result<()> {
@@ -65,7 +65,28 @@ fn check_one(sources: &Sources, block: &ManagedBlock) -> usize {
     };
 
     let mut problems = 0usize;
-    if entry.version != block.version {
+    if let Some(pin) = &block.pinned {
+        let pin_published =
+            entry.version == *pin || entry.versions.iter().any(|v| &v.version == pin);
+        if pin_published {
+            println!(
+                "{} {} {} pinned, up to date",
+                "✓".green(),
+                block.name.bold(),
+                format!("@{} (pinned)", block.version).dimmed()
+            );
+        } else {
+            problems += 1;
+            println!(
+                "{} {} {} pinned to {} but no longer published. Available: {}",
+                "✗".red(),
+                block.name.bold(),
+                format!("@{} (pinned)", block.version).dimmed(),
+                pin.bold(),
+                available_versions(entry).join(", ")
+            );
+        }
+    } else if entry.version != block.version {
         problems += 1;
         println!(
             "{} {} {} newer version available: {}",

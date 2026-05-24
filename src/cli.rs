@@ -53,6 +53,11 @@ pub enum Command {
     Update {
         /// Recipe to update. Omit to update every jtr-managed recipe in the project file.
         name: Option<String>,
+        /// Treat pinned recipes as unpinned for this run: bump them to the latest
+        /// version and drop the pin marker. Without this flag, pinned blocks are
+        /// reported and skipped.
+        #[arg(long)]
+        unpin: bool,
     },
     /// List recipes already installed in the project file.
     #[command(alias = "ls")]
@@ -85,8 +90,8 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Remove { name, force } => {
             commands::remove::run(&name, force, file_override.as_deref())
         }
-        Command::Update { name } => {
-            commands::update::run(&index_url, name.as_deref(), file_override.as_deref())
+        Command::Update { name, unpin } => {
+            commands::update::run(&index_url, name.as_deref(), unpin, file_override.as_deref())
         }
         Command::List => commands::list::run(file_override.as_deref()),
         Command::Search { query } => commands::search::run(&index_url, query.as_deref()),
