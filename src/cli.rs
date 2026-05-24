@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::commands;
+use crate::commands::tap::TapCommand;
 use crate::target::Target;
 
 const DEFAULT_INDEX_URL: &str =
@@ -60,6 +61,11 @@ pub enum Command {
     ///
     /// Exits non-zero if any problems are found, so this is suitable as a CI gate.
     Doctor,
+    /// Manage community taps — extra indices outside the curated registry.
+    Tap {
+        #[command(subcommand)]
+        command: TapCommand,
+    },
 }
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -78,5 +84,6 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::List => commands::list::run(file_override.as_deref()),
         Command::Search { query } => commands::search::run(&index_url, query.as_deref()),
         Command::Doctor => commands::doctor::run(&index_url, file_override.as_deref()),
+        Command::Tap { command } => commands::tap::run(command),
     }
 }

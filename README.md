@@ -124,6 +124,22 @@ jtr list                   # show what's installed
 jtr remove postgres-dev    # strip the managed block, collapse surrounding blanks
 ```
 
+### Add a community tap
+
+Recipes that live outside the curated index — a private set, a team library, a hobbyist's collection — can be pulled in as a tap (modelled on Homebrew taps):
+
+```sh
+jtr tap add alice/recipes              # adds https://raw.githubusercontent.com/alice/recipes/main/index.json
+jtr tap list                           # see what's configured
+jtr search                             # tap recipes show up with their source label
+jtr install alice/recipes/nice-thing   # install a tap recipe; the prefix routes it
+jtr tap remove alice/recipes           # forget a tap; installed blocks stay in place
+```
+
+`jtr tap add` accepts a `--url` override for self-hosted indices and offline testing — e.g. `jtr tap add team/recipes --url file:///tmp/index.json`. Tap-installed recipes appear in `jtr list` / `jtr update` / `jtr doctor` under their full `user/repo/recipe` block name, so they're treated the same as curated recipes for every command.
+
+Taps are stored in `taps.toml` under your platform's config directory (XDG on Linux, `~/Library/Application Support/dev.jtr.jtr/` on macOS). Set `JTR_CONFIG_DIR` to point at a sandbox if you want to inspect or test that location explicitly.
+
 ### Diagnose with `jtr doctor`
 
 ```sh
@@ -150,6 +166,7 @@ If an entry in the index has no `sha256` field, `jtr` prints `warning: ... skipp
 | ---------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------ |
 | `--index <URL>` / `JTR_INDEX_URL` | `https://raw.githubusercontent.com/erbiker/jtr-index/main/index.json` | Registry index location. Accepts `http(s)://`, `file://`, or a local path. |
 | `--file <PATH>`        | auto-detect `justfile` / `Taskfile.yml` in CWD                                 | Project file to read/write.                      |
+| `JTR_CONFIG_DIR`       | platform config dir (`~/.config/jtr/` on Linux, `~/Library/Application Support/dev.jtr.jtr/` on macOS) | Where `taps.toml` is stored. Override for testing or sandboxing. |
 
 ## Local development against the bundled sample index
 
@@ -170,9 +187,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development workflow.
 
 The roadmap is tracked in [GitHub Issues](https://github.com/erbiker/jtr/issues) and discussed in [Discussions](https://github.com/erbiker/jtr/discussions). Near-term focus:
 
-- **`jtr tap <user/repo>`** — Homebrew-style decentralized publishing for community recipes that don't fit the curated index.
 - **Recipe dependencies** — one recipe pulls in others it depends on.
 - **Task (YAML) write target** — `task` users get full install support, not just detection.
+- **Split the registry into its own repo** — once external recipe contributions warrant it.
 
 ## Contributing
 

@@ -2,9 +2,8 @@ use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use std::path::{Path, PathBuf};
 
-use crate::index::Registry;
 use crate::managed::{self, ManagedBlock};
-use crate::manifest::IndexFile;
+use crate::sources::Sources;
 use crate::target;
 
 pub fn run(index_url: &str, file_override: Option<&str>) -> Result<()> {
@@ -25,14 +24,12 @@ pub fn run(index_url: &str, file_override: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    let registry = Registry::new(index_url)?;
-    let index = registry
-        .load_index()
-        .with_context(|| format!("could not load registry index from {}", index_url))?;
+    let sources = Sources::load(index_url)
+        .with_context(|| format!("could not load registry from {index_url}"))?;
 
     let mut problem_count = 0usize;
     for block in &blocks {
-        problem_count += check_one(&registry, &index, block);
+        problem_count += check_one(&sources, block);
     }
 
     println!();
@@ -55,8 +52,8 @@ pub fn run(index_url: &str, file_override: Option<&str>) -> Result<()> {
     bail!("{} {} found", problem_count, noun);
 }
 
-fn check_one(registry: &Registry, index: &IndexFile, block: &ManagedBlock) -> usize {
-    let Some(entry) = index.recipes.iter().find(|r| r.name == block.name) else {
+fn check_one(sources: &Sources, block: &ManagedBlock) -> usize {
+    let Some((source, entry)) = sources.find(&block.name) else {
         println!(
             "{} {} {} no longer in the registry — run `jtr remove {}` to clean up",
             "✗".red(),
@@ -86,7 +83,7 @@ fn check_one(registry: &Registry, index: &IndexFile, block: &ManagedBlock) -> us
         );
     }
 
-    match registry.load_manifest(entry) {
+    match source.registry.load_manifest(entry) {
         Ok(manifest) => {
             for tool in &manifest.shells_out_to {
                 match find_in_path(tool) {

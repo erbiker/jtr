@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 
-use crate::index::Registry;
 use crate::managed;
+use crate::sources::Sources;
 use crate::target;
 
 pub fn run(index_url: &str, name: Option<&str>, file_override: Option<&str>) -> Result<()> {
@@ -34,37 +34,36 @@ pub fn run(index_url: &str, name: Option<&str>, file_override: Option<&str>) -> 
         blocks.iter().map(|b| b.name.clone()).collect()
     };
 
-    let registry = Registry::new(index_url)?;
-    let index = registry.load_index()?;
+    let sources = Sources::load(index_url)?;
 
     let mut current_doc = existing.clone();
     let mut wrote_anything = false;
 
-    for recipe_name in &names_to_update {
+    for block_name in &names_to_update {
         let installed_version = blocks
             .iter()
-            .find(|b| &b.name == recipe_name)
+            .find(|b| &b.name == block_name)
             .map(|b| b.version.clone())
             .expect("name came from blocks above");
 
-        let Some(entry) = index.recipes.iter().find(|r| &r.name == recipe_name) else {
+        let Some((source, entry)) = sources.find(block_name) else {
             println!(
                 "{} {} {} no longer in registry — use `jtr remove {}` to clean up",
                 "!".yellow(),
-                recipe_name.bold(),
+                block_name.bold(),
                 "—".dimmed(),
-                recipe_name
+                block_name
             );
             continue;
         };
 
-        let manifest = registry.load_manifest(entry)?;
+        let manifest = source.registry.load_manifest(entry)?;
 
         let target_key = target.as_str();
         let target_recipe = manifest.targets.get(target_key).ok_or_else(|| {
             anyhow::anyhow!(
                 "recipe '{}' does not support target '{}' (supports: {})",
-                manifest.name,
+                block_name,
                 target_key,
                 manifest
                     .targets
@@ -75,20 +74,25 @@ pub fn run(index_url: &str, name: Option<&str>, file_override: Option<&str>) -> 
             )
         })?;
 
+        let source_link = manifest
+            .homepage
+            .clone()
+            .unwrap_or_else(|| source.registry.base().to_string());
+
         let rendered = managed::render(
-            &manifest.name,
+            block_name,
             &manifest.version,
-            manifest.homepage.as_deref().or(Some(index_url)),
+            Some(&source_link),
             &target_recipe.snippet,
         );
 
-        let new_doc = managed::upsert(&current_doc, &manifest.name, &rendered)?;
+        let new_doc = managed::upsert(&current_doc, block_name, &rendered)?;
 
         if new_doc == current_doc {
             println!(
                 "{} {} {} already at version {}",
                 "✓".green(),
-                manifest.name.bold(),
+                block_name.bold(),
                 "—".dimmed(),
                 manifest.version
             );
@@ -96,7 +100,7 @@ pub fn run(index_url: &str, name: Option<&str>, file_override: Option<&str>) -> 
             println!(
                 "{} updated {} {} → {}",
                 "✓".green(),
-                manifest.name.bold(),
+                block_name.bold(),
                 format!("@{}", installed_version).dimmed(),
                 manifest.version
             );
@@ -106,7 +110,7 @@ pub fn run(index_url: &str, name: Option<&str>, file_override: Option<&str>) -> 
             println!(
                 "{} refreshed {} {} (reverted manual edits to managed block)",
                 "✓".green(),
-                manifest.name.bold(),
+                block_name.bold(),
                 format!("@{}", manifest.version).dimmed()
             );
             current_doc = new_doc;
