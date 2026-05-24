@@ -120,9 +120,27 @@ jtr update                 # update every jtr-managed recipe in this project
 ### List and remove
 
 ```sh
-jtr list                   # show what's installed
-jtr remove postgres-dev    # strip the managed block, collapse surrounding blanks
+jtr list                              # show what's installed
+jtr remove postgres-dev               # strip the managed block, collapse surrounding blanks
+jtr remove postgres-dev --force       # remove even if other installed recipes depend on it
 ```
+
+If another installed recipe depends on the one you're removing, `jtr remove` refuses and names the dependents so you can deal with them first. Pass `--force` to override.
+
+### Recipe dependencies
+
+A recipe manifest can declare other recipes it needs:
+
+```json
+{
+  "name": "nextjs-deploy-vercel",
+  "version": "0.1.0",
+  "dependencies": ["node-lint-format", "alice/recipes/preflight"],
+  "targets": { "just": { "snippet": "..." } }
+}
+```
+
+Installing one recipe pulls in every transitive dependency in the right order. Bare names (e.g. `node-lint-format`) resolve to the curated index; `user/repo/recipe` names resolve to a configured tap. If a dependency references a tap that isn't configured, `jtr install` tells you which `jtr tap add` will fix it. Dependency cycles are caught at install time and reported with the offending chain.
 
 ### Add a community tap
 
@@ -187,7 +205,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development workflow.
 
 The roadmap is tracked in [GitHub Issues](https://github.com/erbiker/jtr/issues) and discussed in [Discussions](https://github.com/erbiker/jtr/discussions). Near-term focus:
 
-- **Recipe dependencies** — one recipe pulls in others it depends on.
 - **Task (YAML) write target** — `task` users get full install support, not just detection.
 - **Split the registry into its own repo** — once external recipe contributions warrant it.
 

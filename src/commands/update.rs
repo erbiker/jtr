@@ -83,6 +83,7 @@ pub fn run(index_url: &str, name: Option<&str>, file_override: Option<&str>) -> 
             block_name,
             &manifest.version,
             Some(&source_link),
+            &manifest.dependencies,
             &target_recipe.snippet,
         );
 
