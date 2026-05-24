@@ -13,6 +13,7 @@ jtr search docker          # browse the registry
 jtr install postgres-dev   # add a recipe to your justfile
 jtr update postgres-dev    # pull the latest version (or `jtr update` for all)
 jtr list                   # see what you've installed
+jtr doctor                 # check for stale blocks, drift, missing tools
 jtr remove postgres-dev    # take it back out
 ```
 
@@ -100,6 +101,20 @@ jtr list                   # show what's installed
 jtr remove postgres-dev    # strip the managed block, collapse surrounding blanks
 ```
 
+### Diagnose with `jtr doctor`
+
+```sh
+jtr doctor                 # check every installed recipe
+```
+
+`jtr doctor` walks every managed block in your project file and reports:
+
+- **Orphaned blocks** — the recipe was removed from the registry; suggests `jtr remove`.
+- **Version drift** — a newer version is available; suggests `jtr update`.
+- **Missing tools** — anything from the recipe's `shells_out_to` that isn't on your `PATH`.
+
+Exits non-zero if any problems are found, so it's safe to drop into CI as a gate.
+
 ## Integrity
 
 Every recipe in the curated index ships with a SHA-256 hash of its manifest. On every install or update, `jtr` re-hashes the fetched manifest and refuses to write anything if the hash doesn't match. The hash is committed to the index as part of the recipe's PR, so any in-flight tampering — a compromised CDN edge, a man-in-the-middle proxy, an attacker with momentary write access to the index repo without matching write access to the manifest file — surfaces as a clear error rather than silently installing modified code.
@@ -134,7 +149,6 @@ The roadmap is tracked in [GitHub Issues](https://github.com/erbiker/jtr/issues)
 
 - **`jtr tap <user/repo>`** — Homebrew-style decentralized publishing for community recipes that don't fit the curated index.
 - **Recipe dependencies** — one recipe pulls in others it depends on.
-- **`jtr doctor`** — diagnose missing tools, stale blocks, version drift.
 - **Task (YAML) write target** — `task` users get full install support, not just detection.
 
 ## Contributing

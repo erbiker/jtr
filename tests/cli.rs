@@ -68,6 +68,61 @@ fn write_postgres_dev_index(dir: &Path, version: &str) -> String {
     format!("file://{}/index.json", dir.display())
 }
 
+/// Build a single-recipe temp index for doctor tests. The recipe's `shells_out_to`
+/// is configurable so callers can exercise both the "all tools present" and "tool
+/// missing" branches without depending on whatever happens to be on the runner's PATH.
+fn write_doctor_index(dir: &Path, name: &str, version: &str, shells_out_to: &[&str]) -> String {
+    let recipes_dir = dir.join("recipes");
+    fs::create_dir_all(&recipes_dir).unwrap();
+
+    let tools = shells_out_to
+        .iter()
+        .map(|t| format!("\"{}\"", t))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let manifest = format!(
+        r#"{{
+  "name": "{name}",
+  "version": "{version}",
+  "description": "doctor fixture",
+  "shells_out_to": [{tools}],
+  "targets": {{
+    "just": {{
+      "snippet": "{name}-noop:\n    @echo ok\n"
+    }}
+  }}
+}}"#
+    );
+    let manifest_file = format!("{name}.json");
+    fs::write(recipes_dir.join(&manifest_file), &manifest).unwrap();
+    let sha = sha256_hex(manifest.as_bytes());
+
+    let index = format!(
+        r#"{{
+  "version": 1,
+  "recipes": [
+    {{
+      "name": "{name}",
+      "version": "{version}",
+      "description": "doctor fixture",
+      "manifest_url": "recipes/{manifest_file}",
+      "targets": ["just"],
+      "sha256": "{sha}"
+    }}
+  ]
+}}"#
+    );
+    fs::write(dir.join("index.json"), index).unwrap();
+
+    format!("file://{}/index.json", dir.display())
+}
+
+fn write_empty_index(dir: &Path) -> String {
+    let index = r#"{"version": 1, "recipes": []}"#;
+    fs::write(dir.join("index.json"), index).unwrap();
+    format!("file://{}/index.json", dir.display())
+}
+
 fn project_with_justfile(initial: &str) -> TempDir {
     let dir = TempDir::new().expect("create temp dir");
     fs::write(dir.path().join("justfile"), initial).expect("write justfile");
@@ -499,6 +554,124 @@ fn init_install_against_freshly_scaffolded_justfile() {
         body.contains("default:"),
         "scaffold-template must survive install"
     );
+}
+
+#[test]
+fn doctor_is_a_friendly_noop_when_nothing_is_installed() {
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(str::contains("no jtr-managed recipes"));
+}
+
+#[test]
+fn doctor_passes_when_installed_recipe_is_current_and_tools_present() {
+    let project = project_with_justfile("default:\n    @echo hi\n");
+    let registry_dir = TempDir::new().unwrap();
+    // `sh` is guaranteed present on every Unix CI runner.
+    let index = write_doctor_index(registry_dir.path(), "shtool", "0.1.0", &["sh"]);
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["install", "shtool"])
+        .assert()
+        .success();
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(str::contains("up to date"))
+        .stdout(str::contains("all checks passed"));
+}
+
+#[test]
+fn doctor_reports_orphaned_block_and_fails() {
+    let project = project_with_justfile("default:\n    @echo hi\n");
+    let registry_dir = TempDir::new().unwrap();
+    let install_index = write_doctor_index(registry_dir.path(), "shtool", "0.1.0", &["sh"]);
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &install_index)
+        .args(["install", "shtool"])
+        .assert()
+        .success();
+
+    // Switch to an index that no longer ships `shtool`.
+    let empty_dir = TempDir::new().unwrap();
+    let empty_index = write_empty_index(empty_dir.path());
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &empty_index)
+        .arg("doctor")
+        .assert()
+        .failure()
+        .stdout(str::contains("no longer in the registry"))
+        .stdout(str::contains("shtool"));
+}
+
+#[test]
+fn doctor_detects_version_drift_and_fails() {
+    let project = project_with_justfile("default:\n    @echo hi\n");
+    let registry_dir = TempDir::new().unwrap();
+
+    let v1 = write_doctor_index(registry_dir.path(), "shtool", "0.1.0", &["sh"]);
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &v1)
+        .args(["install", "shtool"])
+        .assert()
+        .success();
+
+    // Bump the published version without updating the installed block.
+    let v2 = write_doctor_index(registry_dir.path(), "shtool", "0.2.0", &["sh"]);
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &v2)
+        .arg("doctor")
+        .assert()
+        .failure()
+        .stdout(str::contains("newer version available"))
+        .stdout(str::contains("0.2.0"));
+}
+
+#[test]
+fn doctor_reports_missing_tool_and_fails() {
+    let project = project_with_justfile("default:\n    @echo hi\n");
+    let registry_dir = TempDir::new().unwrap();
+    let index = write_doctor_index(
+        registry_dir.path(),
+        "needs-fake-tool",
+        "0.1.0",
+        &["definitely-not-a-real-tool-xyz123"],
+    );
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["install", "needs-fake-tool"])
+        .assert()
+        .success();
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .arg("doctor")
+        .assert()
+        .failure()
+        .stdout(str::contains("definitely-not-a-real-tool-xyz123"))
+        .stdout(str::contains("not found in PATH"));
 }
 
 #[test]

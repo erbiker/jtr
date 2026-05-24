@@ -56,6 +56,10 @@ pub enum Command {
         /// Substring matched against name and description (case-insensitive).
         query: Option<String>,
     },
+    /// Diagnose the installed recipes: orphaned blocks, version drift, missing tools.
+    ///
+    /// Exits non-zero if any problems are found, so this is suitable as a CI gate.
+    Doctor,
 }
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -73,5 +77,6 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Command::List => commands::list::run(file_override.as_deref()),
         Command::Search { query } => commands::search::run(&index_url, query.as_deref()),
+        Command::Doctor => commands::doctor::run(&index_url, file_override.as_deref()),
     }
 }
