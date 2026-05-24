@@ -3,7 +3,7 @@ use colored::Colorize;
 use std::collections::{HashMap, HashSet};
 
 use crate::managed;
-use crate::manifest::{IndexEntry, RecipeManifest};
+use crate::manifest::RecipeManifest;
 use crate::sources::{Source, Sources, block_name_for};
 use crate::target;
 
@@ -142,8 +142,6 @@ pub fn run(index_url: &str, name: &str, file_override: Option<&str>) -> Result<(
 struct Plan<'a> {
     block_name: String,
     source: &'a Source,
-    #[allow(dead_code)] // reserved for future "where did this come from" reporting
-    entry: &'a IndexEntry,
     manifest: RecipeManifest,
     /// True if this plan was pulled in transitively (not directly named by the user).
     is_dependency: bool,
@@ -223,7 +221,6 @@ fn visit<'a>(
     order.push(Plan {
         block_name,
         source,
-        entry,
         manifest,
         is_dependency,
     });
