@@ -18,6 +18,10 @@ pub struct IndexEntry {
     pub manifest_url: String,
     #[serde(default)]
     pub targets: Vec<String>,
+    /// Lowercase hex-encoded SHA-256 of the manifest's raw bytes. Optional
+    /// during the v1 rollout; once present, the fetched manifest must match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

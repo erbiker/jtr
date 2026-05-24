@@ -94,6 +94,8 @@ Then add a corresponding entry to `index.json`:
 }
 ```
 
+After adding or editing **any** manifest, run `just rehash` (or `scripts/recompute-checksums.sh`) to refresh the `sha256` field on every entry in `index.json`. This is mechanical — the script does it for you — but it's required: shipping a manifest whose hash doesn't match the index will cause every install to fail with a checksum error.
+
 ### Guidelines for a good recipe
 
 - **Solve a real, frequently-recurring problem.** "Start a Postgres dev container with a healthcheck" — yes. "My personal blog deploy script" — no.
