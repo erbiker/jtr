@@ -46,7 +46,13 @@ pub fn run(index_url: &str, file_override: Option<&str>) -> Result<()> {
     } else {
         "problems"
     };
-    bail!("doctor found {} {}", problem_count, noun);
+    println!(
+        "{} {} {} found",
+        "✗".red(),
+        problem_count.to_string().bold(),
+        noun
+    );
+    bail!("{} {} found", problem_count, noun);
 }
 
 fn check_one(registry: &Registry, index: &IndexFile, block: &ManagedBlock) -> usize {
@@ -113,7 +119,7 @@ fn check_one(registry: &Registry, index: &IndexFile, block: &ManagedBlock) -> us
 /// Look up `tool` in the directories on `PATH`. On Unix, requires an executable bit.
 /// Mirrors the minimal subset of `which` that doctor needs; intentionally not a
 /// general-purpose helper.
-pub(crate) fn find_in_path(tool: &str) -> Option<PathBuf> {
+fn find_in_path(tool: &str) -> Option<PathBuf> {
     if tool.is_empty() {
         return None;
     }
