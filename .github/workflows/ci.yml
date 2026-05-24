@@ -51,3 +51,31 @@ jobs:
 
       - name: validate-index
         run: just validate-index
+
+  quality:
+    name: dependency audit + format
+    runs-on: ubuntu-latest
+    # License / advisory / unused-dep / TOML-format checks are OS-independent —
+    # no need to run them on every matrix slot. One Linux run is sufficient.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: install cargo-deny, cargo-machete, taplo
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-machete,taplo
+
+      - name: cargo deny check
+        run: cargo deny check
+
+      - name: cargo machete
+        run: cargo machete
+
+      - name: taplo fmt --check
+        run: taplo fmt --check

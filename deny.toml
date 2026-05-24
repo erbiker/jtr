@@ -1,0 +1,49 @@
+# cargo-deny config. See https://embarkstudios.github.io/cargo-deny/checks/index.html
+#
+# Goal: catch supply-chain regressions (vulnerabilities, yanked crates, license
+# drift) without flagging every transitive-dep version skew. Run with `cargo
+# deny check` (also wired into `just check` and CI).
+
+[graph]
+# Skip dev-only crates when evaluating rules: tempfile, tiny_http, assert_cmd,
+# etc. don't ship in the binary, so they don't affect what users get.
+exclude-dev = true
+
+[advisories]
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Allow only OSI-approved / FSF-approved permissive licenses that the Rust
+# ecosystem actually uses. Anything outside this list trips an explicit review.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Unlicense",
+  "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+# Warn on duplicate transitive versions instead of failing — dep upgrades often
+# briefly straddle two majors, and CI churn outweighs the value of forcing
+# instant resolution. Real bans (specific bad crates) go in `deny` below.
+multiple-versions = "warn"
+wildcards = "deny"
+deny = []
+
+[sources]
+# Only crates.io. Git deps require an explicit allowlist entry — keeps a typo
+# in a pull request from silently pulling unaudited code.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
