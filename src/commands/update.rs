@@ -10,6 +10,7 @@ pub fn run(
     name: Option<&str>,
     unpin: bool,
     file_override: Option<&str>,
+    use_cache: bool,
 ) -> Result<()> {
     let (path, target) = target::resolve(file_override)?;
     let existing = std::fs::read_to_string(&path)
@@ -39,7 +40,7 @@ pub fn run(
         blocks.iter().map(|b| b.name.clone()).collect()
     };
 
-    let sources = Sources::load(index_url)?;
+    let sources = Sources::load(index_url, use_cache)?;
 
     let mut current_doc = existing.clone();
     let mut wrote_anything = false;

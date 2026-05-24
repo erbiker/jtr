@@ -24,6 +24,11 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub file: Option<String>,
 
+    /// Bypass the local disk cache for this invocation (skip both read and write).
+    /// Honored by every fetch-touching command — install, update, search, doctor.
+    #[arg(long, global = true)]
+    pub no_cache: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -81,21 +86,26 @@ pub enum Command {
 pub fn run(cli: Cli) -> Result<()> {
     let index_url = cli.index.unwrap_or_else(|| DEFAULT_INDEX_URL.to_string());
     let file_override = cli.file;
+    let use_cache = !cli.no_cache;
 
     match cli.command {
         Command::Init { target } => commands::init::run(target),
         Command::Install { name } => {
-            commands::install::run(&index_url, &name, file_override.as_deref())
+            commands::install::run(&index_url, &name, file_override.as_deref(), use_cache)
         }
         Command::Remove { name, force } => {
             commands::remove::run(&name, force, file_override.as_deref())
         }
-        Command::Update { name, unpin } => {
-            commands::update::run(&index_url, name.as_deref(), unpin, file_override.as_deref())
-        }
+        Command::Update { name, unpin } => commands::update::run(
+            &index_url,
+            name.as_deref(),
+            unpin,
+            file_override.as_deref(),
+            use_cache,
+        ),
         Command::List => commands::list::run(file_override.as_deref()),
-        Command::Search { query } => commands::search::run(&index_url, query.as_deref()),
-        Command::Doctor => commands::doctor::run(&index_url, file_override.as_deref()),
+        Command::Search { query } => commands::search::run(&index_url, query.as_deref(), use_cache),
+        Command::Doctor => commands::doctor::run(&index_url, file_override.as_deref(), use_cache),
         Command::Tap { command } => commands::tap::run(command),
     }
 }

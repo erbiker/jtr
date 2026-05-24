@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 
+use crate::cache::Cache;
 use crate::index::Registry;
 use crate::manifest::{IndexEntry, IndexFile};
 use crate::taps;
@@ -26,10 +27,22 @@ impl Sources {
     /// Load curated and all configured taps. Taps that fail to load are skipped
     /// with a warning rather than failing the whole command — the curated index
     /// alone is still useful, and one broken tap shouldn't brick `jtr search`.
-    pub fn load(curated_url: &str) -> Result<Self> {
+    ///
+    /// `use_cache: false` opts out of the local disk cache for this invocation
+    /// (read AND write skipped) — matches `--no-cache` on the CLI.
+    pub fn load(curated_url: &str, use_cache: bool) -> Result<Self> {
+        let cache = if use_cache {
+            Cache::open().unwrap_or_else(|e| {
+                eprintln!("{} cache disabled: {:#}", "warning:".yellow(), e);
+                None
+            })
+        } else {
+            None
+        };
+
         let mut sources = Vec::new();
 
-        let curated_reg = Registry::new(curated_url)?;
+        let curated_reg = Registry::new(curated_url, cache.clone())?;
         let curated_index = curated_reg
             .load_index()
             .with_context(|| format!("could not load curated index from {curated_url}"))?;
@@ -41,7 +54,7 @@ impl Sources {
 
         let config = taps::load()?;
         for tap in &config.taps {
-            let reg = match Registry::new(&tap.url) {
+            let reg = match Registry::new(&tap.url, cache.clone()) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!(

@@ -4,8 +4,8 @@ use colored::Colorize;
 use crate::manifest::IndexEntry;
 use crate::sources::{CURATED, Sources, block_name_for};
 
-pub fn run(index_url: &str, query: Option<&str>) -> Result<()> {
-    let sources = Sources::load(index_url)?;
+pub fn run(index_url: &str, query: Option<&str>, use_cache: bool) -> Result<()> {
+    let sources = Sources::load(index_url, use_cache)?;
     let needle = query.map(|q| q.to_lowercase());
 
     let mut matches: Vec<(&str, &IndexEntry)> = Vec::new();
