@@ -6,7 +6,7 @@ use crate::managed::{self, ManagedBlock};
 use crate::sources::{Sources, available_versions};
 use crate::target;
 
-pub fn run(index_url: &str, file_override: Option<&str>) -> Result<()> {
+pub fn run(index_url: &str, file_override: Option<&str>, use_cache: bool) -> Result<()> {
     let (path, target) = target::resolve(file_override)?;
     let existing = std::fs::read_to_string(&path)
         .with_context(|| format!("could not read {}", path.display()))?;
@@ -24,7 +24,7 @@ pub fn run(index_url: &str, file_override: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    let sources = Sources::load(index_url)
+    let sources = Sources::load(index_url, use_cache)
         .with_context(|| format!("could not load registry from {index_url}"))?;
 
     let mut problem_count = 0usize;

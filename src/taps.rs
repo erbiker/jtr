@@ -87,13 +87,19 @@ pub fn default_url(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tempfile::TempDir;
 
+    /// Serialises env-var manipulation across taps tests. `JTR_CONFIG_DIR` is
+    /// process-global, so concurrent set/remove in cargo's default parallel
+    /// test harness can produce a window where one test's `taps::save` runs
+    /// against another test's already-dropped TempDir (writes EEXIST on the
+    /// parent dir). Locking around the whole `set → run → remove` keeps the
+    /// var consistent for each test's duration.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
     fn with_config_dir<F: FnOnce()>(dir: &TempDir, f: F) {
-        // Tests in the same binary can race on the env var; serialize via a mutex
-        // if this ever becomes flaky. Today we run them in their own #[test]s and
-        // accept the risk — only one config-dir-touching test runs at a time in
-        // practice because the harness defaults to one thread per test for IO.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var("JTR_CONFIG_DIR", dir.path()) };
         f();
         unsafe { std::env::remove_var("JTR_CONFIG_DIR") };

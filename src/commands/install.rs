@@ -7,12 +7,17 @@ use crate::manifest::RecipeManifest;
 use crate::sources::{Source, Sources, block_name_for};
 use crate::target;
 
-pub fn run(index_url: &str, name: &str, file_override: Option<&str>) -> Result<()> {
+pub fn run(
+    index_url: &str,
+    name: &str,
+    file_override: Option<&str>,
+    use_cache: bool,
+) -> Result<()> {
     let (recipe_name, pin) = split_pin(name)?;
     managed::validate_name(&recipe_name)?;
 
     let (path, target) = target::resolve(file_override)?;
-    let sources = Sources::load(index_url)?;
+    let sources = Sources::load(index_url, use_cache)?;
 
     let order = resolve_install_order(&sources, &recipe_name, pin.as_deref())?;
 

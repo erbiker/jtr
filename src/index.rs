@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use url::Url;
 
+use crate::cache::Cache;
 use crate::manifest::{IndexEntry, IndexFile, RecipeManifest};
 
 const USER_AGENT: &str = concat!("jtr/", env!("CARGO_PKG_VERSION"));
@@ -14,6 +15,7 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 pub struct Registry {
     base: String,
     client: reqwest::blocking::Client,
+    cache: Option<Cache>,
 }
 
 impl Registry {
@@ -23,7 +25,7 @@ impl Registry {
         &self.base
     }
 
-    pub fn new(index_url: &str) -> Result<Self> {
+    pub fn new(index_url: &str, cache: Option<Cache>) -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
             .user_agent(USER_AGENT)
             .timeout(TIMEOUT)
@@ -32,10 +34,15 @@ impl Registry {
         Ok(Self {
             base: index_url.to_string(),
             client,
+            cache,
         })
     }
 
     pub fn load_index(&self) -> Result<IndexFile> {
+        if let Some(cached) = self.read_cached_index(&self.base) {
+            return Ok(cached);
+        }
+
         let raw = self
             .fetch(&self.base)
             .with_context(|| format!("could not load index from {}", self.base))?;
@@ -47,11 +54,17 @@ impl Registry {
                 index.version
             );
         }
+        self.write_cached_index(&self.base, &raw);
         Ok(index)
     }
 
     pub fn load_manifest(&self, entry: &IndexEntry) -> Result<RecipeManifest> {
         let url = self.resolve_relative(&entry.manifest_url)?;
+
+        if let Some(cached) = self.read_cached_manifest(entry, &url) {
+            return Ok(cached);
+        }
+
         let raw = self.fetch(&url).with_context(|| {
             format!("could not load manifest for '{}' from {}", entry.name, url)
         })?;
@@ -65,7 +78,62 @@ impl Registry {
                 entry.name
             );
         }
+        self.write_cached_manifest(entry, &url, &raw);
         Ok(manifest)
+    }
+
+    fn read_cached_index(&self, url: &str) -> Option<IndexFile> {
+        let cache = self.cache.as_ref()?;
+        if !is_cacheable_url(url) {
+            return None;
+        }
+        let raw = cache.read_index(url)?;
+        let parsed = serde_json::from_str::<IndexFile>(&raw).ok()?;
+        if parsed.version != 1 {
+            return None;
+        }
+        Some(parsed)
+    }
+
+    fn write_cached_index(&self, url: &str, raw: &str) {
+        let Some(cache) = self.cache.as_ref() else {
+            return;
+        };
+        if !is_cacheable_url(url) {
+            return;
+        }
+        if let Err(e) = cache.write_index(url, raw) {
+            eprintln!("{} could not cache index: {:#}", "warning:".yellow(), e);
+        }
+    }
+
+    fn read_cached_manifest(&self, entry: &IndexEntry, url: &str) -> Option<RecipeManifest> {
+        let cache = self.cache.as_ref()?;
+        if !is_cacheable_url(url) {
+            return None;
+        }
+        let expected = entry.sha256.as_deref()?;
+        let raw = cache.read_manifest(expected)?;
+        let parsed = serde_json::from_str::<RecipeManifest>(&raw).ok()?;
+        if parsed.name != entry.name {
+            return None;
+        }
+        Some(parsed)
+    }
+
+    fn write_cached_manifest(&self, entry: &IndexEntry, url: &str, raw: &str) {
+        let Some(cache) = self.cache.as_ref() else {
+            return;
+        };
+        if !is_cacheable_url(url) {
+            return;
+        }
+        let Some(expected) = entry.sha256.as_deref() else {
+            return;
+        };
+        if let Err(e) = cache.write_manifest(expected, raw) {
+            eprintln!("{} could not cache manifest: {:#}", "warning:".yellow(), e);
+        }
     }
 
     /// Resolve a possibly-relative manifest URL against the index URL.
@@ -115,6 +183,10 @@ impl Registry {
         // Fallback: treat as a local filesystem path.
         std::fs::read_to_string(location).with_context(|| format!("failed to read {}", location))
     }
+}
+
+fn is_cacheable_url(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -179,7 +251,7 @@ mod tests {
     fn load_manifest_passes_with_correct_checksum() {
         let dir = TempDir::new().unwrap();
         let url = write_index(&dir, Some(&sha256_hex(VALID_MANIFEST.as_bytes())));
-        let registry = Registry::new(&url).unwrap();
+        let registry = Registry::new(&url, None).unwrap();
         let index = registry.load_index().unwrap();
         let manifest = registry.load_manifest(&index.recipes[0]).unwrap();
         assert_eq!(manifest.name, "foo");
@@ -190,7 +262,7 @@ mod tests {
         let bogus = "0".repeat(64);
         let dir = TempDir::new().unwrap();
         let url = write_index(&dir, Some(&bogus));
-        let registry = Registry::new(&url).unwrap();
+        let registry = Registry::new(&url, None).unwrap();
         let index = registry.load_index().unwrap();
         let err = registry.load_manifest(&index.recipes[0]).unwrap_err();
         let msg = format!("{:#}", err);
@@ -212,7 +284,7 @@ mod tests {
     fn load_manifest_succeeds_without_sha_for_backwards_compat() {
         let dir = TempDir::new().unwrap();
         let url = write_index(&dir, None);
-        let registry = Registry::new(&url).unwrap();
+        let registry = Registry::new(&url, None).unwrap();
         let index = registry.load_index().unwrap();
         let manifest = registry.load_manifest(&index.recipes[0]).unwrap();
         assert_eq!(manifest.name, "foo");

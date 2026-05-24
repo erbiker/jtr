@@ -176,6 +176,19 @@ jtr tap remove alice/recipes           # forget a tap; installed blocks stay in 
 
 Taps are stored in `taps.toml` under your platform's config directory (XDG on Linux, `~/Library/Application Support/dev.jtr.jtr/` on macOS). Set `JTR_CONFIG_DIR` to point at a sandbox if you want to inspect or test that location explicitly.
 
+### Skip the local cache
+
+Every `jtr search`/`install`/`update`/`doctor` caches what it fetches under your platform's cache directory (`~/Library/Caches/dev.jtr.jtr/` on macOS, `~/.cache/jtr/` on Linux, honouring `XDG_CACHE_HOME`). Indices are kept for one hour; manifests are content-addressed by their published SHA-256, so they never go stale. Cached data on subsequent invocations means `jtr search` against a registry you already touched in the last hour costs zero network.
+
+Bypass the cache for a single invocation with `--no-cache`:
+
+```sh
+jtr --no-cache search                 # forces a fresh fetch, doesn't read or write cache
+jtr --no-cache install postgres-dev
+```
+
+Cache writes are best-effort: a full disk or read-only filesystem prints a yellow warning and the command keeps going.
+
 ### Diagnose with `jtr doctor`
 
 ```sh
@@ -202,7 +215,9 @@ If an entry in the index has no `sha256` field, `jtr` prints `warning: ... skipp
 | ---------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------ |
 | `--index <URL>` / `JTR_INDEX_URL` | `https://raw.githubusercontent.com/erbiker/jtr-index/main/index.json` | Registry index location. Accepts `http(s)://`, `file://`, or a local path. |
 | `--file <PATH>`        | auto-detect `justfile` / `Taskfile.yml` in CWD                                 | Project file to read/write.                      |
+| `--no-cache`           | cache enabled                                                                  | Bypass the local disk cache for this invocation (no read, no write). |
 | `JTR_CONFIG_DIR`       | platform config dir (`~/.config/jtr/` on Linux, `~/Library/Application Support/dev.jtr.jtr/` on macOS) | Where `taps.toml` is stored. Override for testing or sandboxing. |
+| `JTR_CACHE_DIR`        | platform cache dir (`~/.cache/jtr/` on Linux, `~/Library/Caches/dev.jtr.jtr/` on macOS) | Where cached index/manifest bodies are stored. Override for testing or sandboxing. |
 
 ## Local development against the bundled sample index
 
