@@ -1,4 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
+use colored::Colorize;
+use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
 use url::Url;
@@ -46,6 +49,7 @@ impl Registry {
         let raw = self.fetch(&url).with_context(|| {
             format!("could not load manifest for '{}' from {}", entry.name, url)
         })?;
+        verify_checksum(entry, raw.as_bytes(), &url)?;
         let manifest: RecipeManifest = serde_json::from_str(&raw)
             .with_context(|| format!("manifest for '{}' is not valid JSON", entry.name))?;
         if manifest.name != entry.name {
@@ -104,5 +108,107 @@ impl Registry {
 
         // Fallback: treat as a local filesystem path.
         std::fs::read_to_string(location).with_context(|| format!("failed to read {}", location))
+    }
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        write!(&mut out, "{:02x}", b).expect("writing to String never fails");
+    }
+    out
+}
+
+fn verify_checksum(entry: &IndexEntry, raw: &[u8], source: &str) -> Result<()> {
+    match entry.sha256.as_deref() {
+        Some(expected) => {
+            let actual = sha256_hex(raw);
+            if actual != expected {
+                bail!(
+                    "manifest for '{}' failed checksum verification\n  expected: {}\n  actual:   {}\n  source:   {}",
+                    entry.name,
+                    expected,
+                    actual,
+                    source
+                );
+            }
+        }
+        None => {
+            eprintln!(
+                "{} manifest for '{}' has no sha256 in the index; skipping integrity check",
+                "warning:".yellow(),
+                entry.name
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    const VALID_MANIFEST: &str = r#"{"name":"foo","version":"0.1.0","description":"x","targets":{"just":{"snippet":"foo:\n    @echo hi\n"}}}"#;
+
+    fn write_index(dir: &TempDir, sha: Option<&str>) -> String {
+        let recipes = dir.path().join("recipes");
+        fs::create_dir_all(&recipes).unwrap();
+        fs::write(recipes.join("foo.json"), VALID_MANIFEST).unwrap();
+        let sha_field = match sha {
+            Some(s) => format!(",\"sha256\":\"{s}\""),
+            None => String::new(),
+        };
+        let index = format!(
+            r#"{{"version":1,"recipes":[{{"name":"foo","version":"0.1.0","description":"x","manifest_url":"recipes/foo.json","targets":["just"]{sha_field}}}]}}"#
+        );
+        let index_path = dir.path().join("index.json");
+        fs::write(&index_path, index).unwrap();
+        format!("file://{}", index_path.display())
+    }
+
+    #[test]
+    fn load_manifest_passes_with_correct_checksum() {
+        let dir = TempDir::new().unwrap();
+        let url = write_index(&dir, Some(&sha256_hex(VALID_MANIFEST.as_bytes())));
+        let registry = Registry::new(&url).unwrap();
+        let index = registry.load_index().unwrap();
+        let manifest = registry.load_manifest(&index.recipes[0]).unwrap();
+        assert_eq!(manifest.name, "foo");
+    }
+
+    #[test]
+    fn load_manifest_rejects_bad_checksum() {
+        let bogus = "0".repeat(64);
+        let dir = TempDir::new().unwrap();
+        let url = write_index(&dir, Some(&bogus));
+        let registry = Registry::new(&url).unwrap();
+        let index = registry.load_index().unwrap();
+        let err = registry.load_manifest(&index.recipes[0]).unwrap_err();
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("checksum"),
+            "expected checksum error, got: {msg}"
+        );
+        assert!(
+            msg.contains(&bogus),
+            "error should name the expected hash, got: {msg}"
+        );
+        assert!(
+            msg.contains(&sha256_hex(VALID_MANIFEST.as_bytes())),
+            "error should name the actual hash, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn load_manifest_succeeds_without_sha_for_backwards_compat() {
+        let dir = TempDir::new().unwrap();
+        let url = write_index(&dir, None);
+        let registry = Registry::new(&url).unwrap();
+        let index = registry.load_index().unwrap();
+        let manifest = registry.load_manifest(&index.recipes[0]).unwrap();
+        assert_eq!(manifest.name, "foo");
     }
 }

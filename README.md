@@ -89,6 +89,12 @@ jtr list                   # show what's installed
 jtr remove postgres-dev    # strip the managed block, collapse surrounding blanks
 ```
 
+## Integrity
+
+Every recipe in the curated index ships with a SHA-256 hash of its manifest. On every install or update, `jtr` re-hashes the fetched manifest and refuses to write anything if the hash doesn't match. The hash is committed to the index as part of the recipe's PR, so any in-flight tampering — a compromised CDN edge, a man-in-the-middle proxy, an attacker with momentary write access to the index repo without matching write access to the manifest file — surfaces as a clear error rather than silently installing modified code.
+
+If an entry in the index has no `sha256` field, `jtr` prints `warning: ... skipping integrity check` to stderr and proceeds. This is intentional during the v1 rollout so third-party indexes can be adopted before they're fully hashed; once the seed registry stabilizes we'll make checksums mandatory.
+
 ## Configuration
 
 | Flag / env             | Default                                                                        | Meaning                                          |
@@ -115,7 +121,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development workflow.
 
 The roadmap is tracked in [GitHub Issues](https://github.com/erbiker/jtr/issues) and discussed in [Discussions](https://github.com/erbiker/jtr/discussions). Near-term focus:
 
-- **Checksum verification on fetch** — baseline supply-chain hygiene.
 - **`jtr init`** — scaffold a fresh `justfile` / `Taskfile.yml`.
 - **`jtr tap <user/repo>`** — Homebrew-style decentralized publishing for community recipes that don't fit the curated index.
 - **Recipe dependencies** — one recipe pulls in others it depends on.

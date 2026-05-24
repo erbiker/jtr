@@ -5,9 +5,20 @@
 
 use assert_cmd::Command;
 use predicates::str;
+use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        write!(&mut out, "{:02x}", b).unwrap();
+    }
+    out
+}
 
 fn sample_index_url() -> String {
     format!("file://{}/jtr-index/index.json", env!("CARGO_MANIFEST_DIR"))
@@ -34,7 +45,8 @@ fn write_postgres_dev_index(dir: &Path, version: &str) -> String {
   }}
 }}"#
     );
-    fs::write(recipes_dir.join("postgres-dev.json"), manifest).unwrap();
+    fs::write(recipes_dir.join("postgres-dev.json"), &manifest).unwrap();
+    let sha = sha256_hex(manifest.as_bytes());
 
     let index = format!(
         r#"{{
@@ -45,7 +57,8 @@ fn write_postgres_dev_index(dir: &Path, version: &str) -> String {
       "version": "{version}",
       "description": "test fixture postgres-dev",
       "manifest_url": "recipes/postgres-dev.json",
-      "targets": ["just"]
+      "targets": ["just"],
+      "sha256": "{sha}"
     }}
   ]
 }}"#

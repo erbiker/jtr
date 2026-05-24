@@ -54,6 +54,11 @@ smoke: build
 clean:
     cargo clean
 
+# Recompute sha256 checksums for every manifest referenced from jtr-index/index.json.
+# Run after editing any recipe manifest, then commit the resulting index.json change.
+rehash:
+    scripts/recompute-checksums.sh
+
 # Validate that every recipe in jtr-index/ parses as valid `just` syntax.
 # Installs each recipe individually into a temp justfile and runs `just --list`
 # to ensure the registry's seed catalog cannot ship a recipe that breaks user files.
