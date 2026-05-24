@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, anyhow};
+use clap::ValueEnum;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Target {
     Just,
     Task,
