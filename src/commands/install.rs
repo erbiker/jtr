@@ -167,7 +167,7 @@ struct Plan<'a> {
 
 /// Split `foo@1.2.0` into `("foo", Some("1.2.0"))`. Bare names return `(name, None)`.
 /// Errors if the `@version` half is empty (e.g. user typed `foo@`).
-fn split_pin(input: &str) -> Result<(String, Option<String>)> {
+pub(crate) fn split_pin(input: &str) -> Result<(String, Option<String>)> {
     match input.rsplit_once('@') {
         Some((name, version)) => {
             if name.is_empty() {
@@ -275,7 +275,11 @@ fn visit<'a>(
     Ok(())
 }
 
-fn describe_missing(sources: &Sources, requested_root: &str, missing: &str) -> anyhow::Error {
+pub(crate) fn describe_missing(
+    sources: &Sources,
+    requested_root: &str,
+    missing: &str,
+) -> anyhow::Error {
     let slash_count = missing.chars().filter(|c| *c == '/').count();
     if slash_count == 2
         && let Some((tap, _)) = missing.rsplit_once('/')
