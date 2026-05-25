@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 use crate::commands;
 use crate::commands::tap::TapCommand;
@@ -97,6 +98,42 @@ pub enum Command {
         #[command(subcommand)]
         command: TapCommand,
     },
+    /// Validate recipe manifests and (optionally) a whole tap. Designed as a
+    /// drop-in CI step for tap maintainers; also runs against single manifests
+    /// for quick local checks while authoring.
+    Lint {
+        /// Path to a recipe manifest JSON file, or — with --tap — to a tap
+        /// repo root containing an index.json.
+        path: PathBuf,
+        /// Treat `path` as a tap repo root. Validates index.json, every
+        /// referenced manifest, snippet syntax, checksum consistency, and
+        /// cross-field agreement between manifest and index entry.
+        #[arg(long)]
+        tap: bool,
+        /// Update sha256 checksums in index.json to match each referenced
+        /// manifest. Requires --tap because checksums live in the index, not
+        /// the manifest. Other findings are still reported but not fixed.
+        #[arg(long)]
+        fix: bool,
+    },
+    /// Scaffold a new recipe — writes a manifest skeleton and, when run inside
+    /// a tap repo (cwd contains index.json), appends a stub entry to the index.
+    Scaffold {
+        #[command(subcommand)]
+        command: ScaffoldCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ScaffoldCommand {
+    /// Create a recipe manifest skeleton ready for hand-editing.
+    Recipe {
+        /// Recipe name (lowercase letters, digits, dash, dot, underscore).
+        name: String,
+        /// Which project file the recipe targets. Defaults to `just`.
+        #[arg(long, value_enum, default_value_t = Target::Just)]
+        target: Target,
+    },
 }
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -129,5 +166,9 @@ pub fn run(cli: Cli) -> Result<()> {
             commands::diff::run(&index_url, &name, file_override.as_deref(), use_cache)
         }
         Command::Tap { command } => commands::tap::run(command),
+        Command::Lint { path, tap, fix } => commands::lint::run(path, tap, fix),
+        Command::Scaffold { command } => match command {
+            ScaffoldCommand::Recipe { name, target } => commands::scaffold::run(&name, target),
+        },
     }
 }
