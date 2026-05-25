@@ -29,7 +29,11 @@ pub struct ManagedBlock {
 }
 
 pub fn open_marker(name: &str) -> String {
-    format!("# >>> jtr:{name}", name = name)
+    // The trailing `@` is the boundary against the version suffix in the
+    // rendered open line (`# >>> jtr:<name>@<version> >>>`). Without it,
+    // `starts_with(open_marker("foo"))` also matches a `foo-bar` block —
+    // see [issue #12](https://github.com/erbiker/jtr/issues/12).
+    format!("# >>> jtr:{name}@", name = name)
 }
 
 pub fn close_marker(name: &str) -> String {
@@ -375,6 +379,23 @@ mod tests {
         // Exactly one blank line between the two surviving regions.
         assert!(out.contains("    @echo a\n\nlast:"));
         assert!(!out.contains("\n\n\n"));
+    }
+
+    #[test]
+    fn remove_does_not_strip_blocks_with_shared_prefix() {
+        // Regression for #12: `remove("foo")` used to match `foo-bar`'s open
+        // marker via `starts_with("# >>> jtr:foo")`, then consume everything
+        // up to (and past) `foo-bar`'s body looking for `foo`'s close.
+        let foo = render("foo", "0.1.0", None, None, &[], "foo:\n    @echo a");
+        let foo_bar = render("foo-bar", "0.2.0", None, None, &[], "foo-bar:\n    @echo b");
+        let doc = format!("default:\n    @echo hi\n\n{}\n{}", foo, foo_bar);
+
+        let (out, removed) = remove(&doc, "foo");
+        assert!(removed);
+        assert!(!out.contains("# >>> jtr:foo@"));
+        assert!(out.contains("# >>> jtr:foo-bar@0.2.0 >>>"));
+        assert!(out.contains("foo-bar:\n    @echo b"));
+        assert!(out.contains("# <<< jtr:foo-bar <<<"));
     }
 
     #[test]
