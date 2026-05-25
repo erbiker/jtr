@@ -259,7 +259,10 @@ fn install_is_idempotent_for_same_version() {
         .stdout(str::contains("already at version"));
 
     let result = fs::read_to_string(project.path().join("justfile")).unwrap();
-    let occurrences = result.matches("# >>> jtr:postgres-dev").count();
+    // Use the `@` boundary (mirrors the production fix for #12) so this
+    // assertion doesn't false-positive if a sibling `postgres-dev-…` recipe
+    // is ever added to the sample index.
+    let occurrences = result.matches("# >>> jtr:postgres-dev@").count();
     assert_eq!(
         occurrences, 1,
         "expected exactly one postgres-dev block; got {occurrences}"
@@ -336,6 +339,48 @@ fn remove_nonexistent_block_is_a_noop() {
 
     let result = fs::read_to_string(project.path().join("justfile")).unwrap();
     assert_eq!(result, "default:\n    @echo hi\n");
+}
+
+#[test]
+fn remove_with_prefix_overlapping_name_leaves_sibling_intact() {
+    // Regression for #12: removing `foo` used to prefix-match `foo-bar`'s
+    // open marker (`# >>> jtr:foo` is a prefix of `# >>> jtr:foo-bar@...`)
+    // and silently strip the sibling block too. The fix adds a trailing `@`
+    // to `open_marker` so it's a proper boundary.
+    let registry_dir = TempDir::new().unwrap();
+    let index = write_dep_index(
+        registry_dir.path(),
+        &[("foo", "0.1.0", &[]), ("foo-bar", "0.2.0", &[])],
+    );
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    for recipe in ["foo-bar", "foo"] {
+        jtr()
+            .current_dir(project.path())
+            .env("JTR_INDEX_URL", &index)
+            .args(["install", recipe])
+            .assert()
+            .success();
+    }
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["remove", "foo"])
+        .assert()
+        .success();
+
+    let body = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(!body.contains("# >>> jtr:foo@"), "foo should be removed");
+    assert!(
+        body.contains("# >>> jtr:foo-bar@0.2.0 >>>"),
+        "foo-bar should survive the remove of foo:\n{body}"
+    );
+    assert!(
+        body.contains("foo-bar-noop:"),
+        "foo-bar body should survive"
+    );
+    assert!(body.contains("# <<< jtr:foo-bar <<<"));
 }
 
 #[test]
