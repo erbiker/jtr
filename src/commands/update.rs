@@ -187,14 +187,23 @@ fn apply_plan(
     } else {
         String::new()
     };
+    // Show `(pinned)` so the user can see a transitive dep stayed pinned across an
+    // update of its dependent — without it, "already at version v" reads as a
+    // happens-to-be-current, not as a deliberate pin propagation.
+    let pin_suffix = if plan.pinned.is_some() {
+        format!(" {}", "(pinned)".dimmed())
+    } else {
+        String::new()
+    };
 
     if new_doc == *current_doc {
         println!(
-            "{} {} {} already at version {}{}",
+            "{} {} {} already at version {}{}{}",
             "✓".green(),
             plan.block_name.bold(),
             "—".dimmed(),
             plan.manifest.version,
+            pin_suffix,
             dep_suffix
         );
         return Ok(());
@@ -203,10 +212,11 @@ fn apply_plan(
     match pre_existing {
         None => {
             println!(
-                "{} installed {} ({}){}",
+                "{} installed {} ({}){}{}",
                 "✓".green(),
                 plan.block_name.bold(),
                 plan.manifest.version,
+                pin_suffix,
                 dep_suffix
             );
         }
@@ -221,19 +231,21 @@ fn apply_plan(
                 );
             } else if prior.version != plan.manifest.version {
                 println!(
-                    "{} updated {} {} → {}{}",
+                    "{} updated {} {} → {}{}{}",
                     "✓".green(),
                     plan.block_name.bold(),
                     format!("@{}", prior.version).dimmed(),
                     plan.manifest.version,
+                    pin_suffix,
                     dep_suffix
                 );
             } else {
                 println!(
-                    "{} refreshed {} {} (reverted manual edits to managed block){}",
+                    "{} refreshed {} {} (reverted manual edits to managed block){}{}",
                     "✓".green(),
                     plan.block_name.bold(),
                     format!("@{}", plan.manifest.version).dimmed(),
+                    pin_suffix,
                     dep_suffix
                 );
             }

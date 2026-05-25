@@ -211,7 +211,6 @@ pub(crate) fn resolve_install_order<'a>(
 ) -> Result<Vec<Plan<'a>>> {
     let mut visited: HashSet<String> = HashSet::new();
     let mut order: Vec<Plan<'a>> = Vec::new();
-    let mut cache: HashMap<String, RecipeManifest> = HashMap::new();
 
     visit(
         sources,
@@ -222,7 +221,6 @@ pub(crate) fn resolve_install_order<'a>(
         &mut visited,
         &mut Vec::new(),
         &mut order,
-        &mut cache,
         false,
     )?;
     Ok(order)
@@ -238,7 +236,6 @@ fn visit<'a>(
     visited: &mut HashSet<String>,
     on_stack: &mut Vec<String>,
     order: &mut Vec<Plan<'a>>,
-    cache: &mut HashMap<String, RecipeManifest>,
     is_dependency: bool,
 ) -> Result<()> {
     if visited.contains(name) {
@@ -293,14 +290,12 @@ fn visit<'a>(
             visited,
             on_stack,
             order,
-            cache,
             true,
         )?;
     }
     on_stack.pop();
 
     let block_name = block_name_for(&source.label, &manifest.name);
-    cache.insert(name.to_string(), manifest.clone());
     order.push(Plan {
         block_name,
         source,
