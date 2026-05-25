@@ -259,7 +259,10 @@ fn install_is_idempotent_for_same_version() {
         .stdout(str::contains("already at version"));
 
     let result = fs::read_to_string(project.path().join("justfile")).unwrap();
-    let occurrences = result.matches("# >>> jtr:postgres-dev").count();
+    // Use the `@` boundary (mirrors the production fix for #12) so this
+    // assertion doesn't false-positive if a sibling `postgres-dev-…` recipe
+    // is ever added to the sample index.
+    let occurrences = result.matches("# >>> jtr:postgres-dev@").count();
     assert_eq!(
         occurrences, 1,
         "expected exactly one postgres-dev block; got {occurrences}"
