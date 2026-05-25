@@ -19,7 +19,12 @@ pub fn run(
     let (path, target) = target::resolve(file_override)?;
     let sources = Sources::load(index_url, use_cache)?;
 
-    let order = resolve_install_order(&sources, &recipe_name, pin.as_deref())?;
+    let existing = std::fs::read_to_string(&path)
+        .with_context(|| format!("could not read {}", path.display()))?;
+    let already = managed::parse_all(&existing);
+    let installed_pins = pins_from_blocks(&already);
+
+    let order = resolve_install_order(&sources, &recipe_name, pin.as_deref(), &installed_pins)?;
 
     let target_key = target.as_str();
     for plan in &order {
@@ -58,10 +63,6 @@ pub fn run(
             snippet
         );
     }
-
-    let existing = std::fs::read_to_string(&path)
-        .with_context(|| format!("could not read {}", path.display()))?;
-    let already = managed::parse_all(&existing);
 
     let mut current_doc = existing.clone();
     let mut wrote_anything = false;
@@ -153,16 +154,26 @@ pub fn run(
     Ok(())
 }
 
-struct Plan<'a> {
-    block_name: String,
-    source: &'a Source,
-    manifest: RecipeManifest,
+pub(crate) struct Plan<'a> {
+    pub(crate) block_name: String,
+    pub(crate) source: &'a Source,
+    pub(crate) manifest: RecipeManifest,
     /// True if this plan was pulled in transitively (not directly named by the user).
-    is_dependency: bool,
-    /// Set when the user asked for this specific version (`foo@1.2.0`). Only the
-    /// user-requested root ever carries a pin — transitive deps stay free per
-    /// the v1 design (no lockfile yet).
-    pinned: Option<String>,
+    pub(crate) is_dependency: bool,
+    /// Set when the user asked for this specific version (`foo@1.2.0`), OR when
+    /// a transitive dep is already installed in the project file with an explicit
+    /// pin — in that case the pin propagates so we don't silently bump it.
+    pub(crate) pinned: Option<String>,
+}
+
+/// Build a `block_name -> pinned_version` map from a parsed project file.
+/// Used to honor existing pinned blocks during transitive resolution so that
+/// installing or updating *any* recipe never silently unpins another block.
+pub(crate) fn pins_from_blocks(blocks: &[managed::ManagedBlock]) -> HashMap<String, String> {
+    blocks
+        .iter()
+        .filter_map(|b| b.pinned.as_ref().map(|p| (b.name.clone(), p.clone())))
+        .collect()
 }
 
 /// Split `foo@1.2.0` into `("foo", Some("1.2.0"))`. Bare names return `(name, None)`.
@@ -189,11 +200,14 @@ pub(crate) fn split_pin(input: &str) -> Result<(String, Option<String>)> {
 /// after the things it depends on. Errors on cycles, naming both endpoints in the
 /// error message. The first element of the returned `Vec` is the leaf-most dep;
 /// the last is the user-requested `root`. The `root_pin` is plumbed into the root's
-/// `Plan` only — deps always resolve to latest.
-fn resolve_install_order<'a>(
+/// `Plan` only. Transitive deps inherit pins from `installed_pins` (a block_name →
+/// pinned_version map of what's already in the project file) so existing pinned
+/// blocks are never silently bumped when their dependent is (re)installed.
+pub(crate) fn resolve_install_order<'a>(
     sources: &'a Sources,
     root: &str,
     root_pin: Option<&str>,
+    installed_pins: &HashMap<String, String>,
 ) -> Result<Vec<Plan<'a>>> {
     let mut visited: HashSet<String> = HashSet::new();
     let mut order: Vec<Plan<'a>> = Vec::new();
@@ -204,6 +218,7 @@ fn resolve_install_order<'a>(
         root,
         root,
         root_pin,
+        installed_pins,
         &mut visited,
         &mut Vec::new(),
         &mut order,
@@ -219,6 +234,7 @@ fn visit<'a>(
     requested_root: &str,
     name: &str,
     pin: Option<&str>,
+    installed_pins: &HashMap<String, String>,
     visited: &mut HashSet<String>,
     on_stack: &mut Vec<String>,
     order: &mut Vec<Plan<'a>>,
@@ -235,8 +251,28 @@ fn visit<'a>(
         bail!("dependency cycle detected: {}", chain.join(" → "));
     }
 
+    // Two-pass resolve: first locate the source so we can compute the candidate
+    // block name (curated → bare, tap → tap-name/recipe), then look up
+    // installed_pins for that block name. If the dep is a transitive node that
+    // already has a pin on disk, propagate the pin into the find_at call so we
+    // walk the pinned manifest, not latest. Without this step, a pinned
+    // transitive dep would be silently bumped to latest whenever its dependent
+    // is (re)installed or updated.
+    let (preliminary_source, preliminary_entry) = sources
+        .find(name)
+        .ok_or_else(|| describe_missing(sources, requested_root, name))?;
+    let candidate_block_name = block_name_for(&preliminary_source.label, &preliminary_entry.name);
+
+    let effective_pin: Option<String> = if let Some(p) = pin {
+        Some(p.to_string())
+    } else if is_dependency {
+        installed_pins.get(&candidate_block_name).cloned()
+    } else {
+        None
+    };
+
     let (source, entry) = sources
-        .find_at(name, pin)?
+        .find_at(name, effective_pin.as_deref())?
         .ok_or_else(|| describe_missing(sources, requested_root, name))?;
     let manifest = source
         .registry
@@ -253,6 +289,7 @@ fn visit<'a>(
             requested_root,
             &dep,
             None,
+            installed_pins,
             visited,
             on_stack,
             order,
@@ -269,7 +306,7 @@ fn visit<'a>(
         source,
         manifest,
         is_dependency,
-        pinned: pin.map(|s| s.to_string()),
+        pinned: effective_pin,
     });
     visited.insert(name.to_string());
     Ok(())

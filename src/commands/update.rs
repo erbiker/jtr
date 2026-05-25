@@ -1,6 +1,7 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use colored::Colorize;
 
+use crate::commands::install::{Plan, pins_from_blocks, resolve_install_order};
 use crate::managed::{self, ManagedBlock};
 use crate::sources::Sources;
 use crate::target;
@@ -46,14 +47,19 @@ pub fn run(
     let mut wrote_anything = false;
 
     for block_name in &names_to_update {
-        let block = blocks
-            .iter()
-            .find(|b| &b.name == block_name)
-            .expect("name came from blocks above");
+        // Re-parse each iteration so transitive deps installed by an earlier
+        // update_one call are visible to later ones (deduplicated as
+        // "already at version", not re-installed).
+        let blocks_now = managed::parse_all(&current_doc);
+        let Some(block) = blocks_now.iter().find(|b| &b.name == block_name) else {
+            // Earlier iteration removed this block somehow — nothing left to update.
+            continue;
+        };
 
         update_one(
             &sources,
             block,
+            &blocks_now,
             target.as_str(),
             unpin,
             &mut current_doc,
@@ -72,6 +78,7 @@ pub fn run(
 fn update_one(
     sources: &Sources,
     block: &ManagedBlock,
+    blocks_now: &[ManagedBlock],
     target_key: &str,
     unpin: bool,
     current_doc: &mut String,
@@ -98,7 +105,7 @@ fn update_one(
         return Ok(());
     }
 
-    let Some((source, entry)) = sources.find(block_name) else {
+    if sources.find(block_name).is_none() {
         println!(
             "{} {} {} no longer in registry — use `jtr remove {}` to clean up",
             "!".yellow(),
@@ -107,16 +114,48 @@ fn update_one(
             block_name
         );
         return Ok(());
-    };
+    }
 
-    let manifest = source.registry.load_manifest(entry)?;
+    // Build a `block_name -> pinned` map from the *current* doc, then strip the
+    // entry for this block when --unpin is in play. That way the root walks at
+    // latest while other blocks' pins are still honoured for transitive deps.
+    let mut installed_pins = pins_from_blocks(blocks_now);
+    if unpin {
+        installed_pins.remove(block_name);
+    }
 
-    let target_recipe = manifest.targets.get(target_key).ok_or_else(|| {
-        anyhow::anyhow!(
-            "recipe '{}' does not support target '{}' (supports: {})",
-            block_name,
+    let order = resolve_install_order(sources, block_name, None, &installed_pins)?;
+
+    for plan in &order {
+        apply_plan(
+            plan,
+            blocks_now,
+            block,
             target_key,
-            manifest
+            unpin,
+            current_doc,
+            wrote_anything,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn apply_plan(
+    plan: &Plan<'_>,
+    blocks_now: &[ManagedBlock],
+    root_block: &ManagedBlock,
+    target_key: &str,
+    unpin: bool,
+    current_doc: &mut String,
+    wrote_anything: &mut bool,
+) -> Result<()> {
+    let target_recipe = plan.manifest.targets.get(target_key).ok_or_else(|| {
+        anyhow!(
+            "recipe '{}' does not support target '{}' (supports: {})",
+            plan.block_name,
+            target_key,
+            plan.manifest
                 .targets
                 .keys()
                 .cloned()
@@ -125,62 +164,83 @@ fn update_one(
         )
     })?;
 
-    let source_link = manifest
+    let source_link = plan
+        .manifest
         .homepage
         .clone()
-        .unwrap_or_else(|| source.registry.base().to_string());
+        .unwrap_or_else(|| plan.source.registry.base().to_string());
 
-    // `--unpin` drops the pin marker; otherwise an unpinned block stays unpinned.
     let rendered = managed::render(
-        block_name,
-        &manifest.version,
+        &plan.block_name,
+        &plan.manifest.version,
         Some(&source_link),
-        None,
-        &manifest.dependencies,
+        plan.pinned.as_deref(),
+        &plan.manifest.dependencies,
         &target_recipe.snippet,
     );
 
-    let new_doc = managed::upsert(current_doc, block_name, &rendered)?;
+    let new_doc = managed::upsert(current_doc, &plan.block_name, &rendered)?;
+    let pre_existing = blocks_now.iter().find(|b| b.name == plan.block_name);
+    let is_root = plan.block_name == root_block.name;
+    let dep_suffix = if plan.is_dependency {
+        format!(" {}", "(dependency)".dimmed())
+    } else {
+        String::new()
+    };
 
-    let was_pinned = block.pinned.is_some();
     if new_doc == *current_doc {
         println!(
-            "{} {} {} already at version {}",
+            "{} {} {} already at version {}{}",
             "✓".green(),
-            block_name.bold(),
+            plan.block_name.bold(),
             "—".dimmed(),
-            manifest.version
+            plan.manifest.version,
+            dep_suffix
         );
-    } else if was_pinned {
-        println!(
-            "{} unpinned {} {} → {}",
-            "✓".green(),
-            block_name.bold(),
-            format!("@{} (pinned)", block.version).dimmed(),
-            manifest.version
-        );
-        *current_doc = new_doc;
-        *wrote_anything = true;
-    } else if block.version != manifest.version {
-        println!(
-            "{} updated {} {} → {}",
-            "✓".green(),
-            block_name.bold(),
-            format!("@{}", block.version).dimmed(),
-            manifest.version
-        );
-        *current_doc = new_doc;
-        *wrote_anything = true;
-    } else {
-        println!(
-            "{} refreshed {} {} (reverted manual edits to managed block)",
-            "✓".green(),
-            block_name.bold(),
-            format!("@{}", manifest.version).dimmed()
-        );
-        *current_doc = new_doc;
-        *wrote_anything = true;
+        return Ok(());
     }
 
+    match pre_existing {
+        None => {
+            println!(
+                "{} installed {} ({}){}",
+                "✓".green(),
+                plan.block_name.bold(),
+                plan.manifest.version,
+                dep_suffix
+            );
+        }
+        Some(prior) => {
+            if is_root && root_block.pinned.is_some() && unpin {
+                println!(
+                    "{} unpinned {} {} → {}",
+                    "✓".green(),
+                    plan.block_name.bold(),
+                    format!("@{} (pinned)", root_block.version).dimmed(),
+                    plan.manifest.version
+                );
+            } else if prior.version != plan.manifest.version {
+                println!(
+                    "{} updated {} {} → {}{}",
+                    "✓".green(),
+                    plan.block_name.bold(),
+                    format!("@{}", prior.version).dimmed(),
+                    plan.manifest.version,
+                    dep_suffix
+                );
+            } else {
+                println!(
+                    "{} refreshed {} {} (reverted manual edits to managed block){}",
+                    "✓".green(),
+                    plan.block_name.bold(),
+                    format!("@{}", plan.manifest.version).dimmed(),
+                    dep_suffix
+                );
+            }
+        }
+    }
+
+    *current_doc = new_doc;
+    *wrote_anything = true;
     Ok(())
 }
