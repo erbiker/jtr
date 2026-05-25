@@ -310,6 +310,19 @@ fn check_manifest_bytes(scope: &str, bytes: &[u8]) -> Vec<Finding> {
             "`targets` is empty — at least one of `just` or `task` is required",
         ));
     }
+
+    for tool in &manifest.shells_out_to {
+        if which(tool).is_none() {
+            findings.push(Finding::warning(
+                scope,
+                format!(
+                    "`shells_out_to` lists '{tool}', but it isn't on PATH — \
+                     install it locally to verify the recipe actually runs"
+                ),
+            ));
+        }
+    }
+
     for (target_name, target) in &manifest.targets {
         if target_name != "just" && target_name != "task" {
             findings.push(Finding::warning(

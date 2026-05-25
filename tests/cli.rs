@@ -2630,6 +2630,33 @@ fn lint_tap_detects_field_drift_between_manifest_and_index() {
 }
 
 #[test]
+fn lint_warns_when_shells_out_to_lists_missing_tool() {
+    let dir = TempDir::new().unwrap();
+    let manifest = r#"{
+  "name": "needs-ghost",
+  "version": "0.1.0",
+  "description": "uses a nonexistent tool",
+  "shells_out_to": ["definitely-not-a-real-tool-xyz123"],
+  "targets": {
+    "just": {
+      "snippet": "needs-ghost:\n    @echo hi\n"
+    }
+  }
+}"#;
+    let path = dir.path().join("needs-ghost.json");
+    fs::write(&path, manifest).unwrap();
+    // Exit 0 because PATH-missing is a warning, not an error — but the
+    // warning must surface on stdout so authors notice before publishing.
+    jtr()
+        .arg("lint")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout(str::contains("definitely-not-a-real-tool-xyz123"))
+        .stdout(str::contains("PATH"));
+}
+
+#[test]
 fn scaffold_then_lint_fix_round_trip_succeeds() {
     let dir = TempDir::new().unwrap();
     empty_tap(dir.path());
