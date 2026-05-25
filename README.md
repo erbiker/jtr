@@ -160,6 +160,8 @@ A recipe manifest can declare other recipes it needs:
 
 Installing one recipe pulls in every transitive dependency in the right order. Bare names (e.g. `node-lint-format`) resolve to the curated index; `user/repo/recipe` names resolve to a configured tap. If a dependency references a tap that isn't configured, `jtr install` tells you which `jtr tap add` will fix it. Dependency cycles are caught at install time and reported with the offending chain.
 
+`jtr update` walks the same dependency graph. If a new version of a recipe adds a transitive dep, `jtr update <name>` installs it alongside the bumped block. Existing unpinned deps are bumped to latest as part of the same update; deps you've pinned via `jtr install <dep>@<version>` stay at the pinned version even when their dependent is updated.
+
 ### Add a community tap
 
 Recipes that live outside the curated index — a private set, a team library, a hobbyist's collection — can be pulled in as a tap (modelled on Homebrew taps):

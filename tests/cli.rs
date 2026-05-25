@@ -1983,3 +1983,356 @@ fn diff_of_pinned_block_compares_against_the_pin_not_latest() {
         .assert()
         .success();
 }
+
+#[test]
+fn update_installs_newly_added_transitive_dependency() {
+    // Regression for #8. Install `a` at v1 (no deps); then publish `a` at v2 with
+    // a new dep on `b`; then `jtr update a` should install `b` alongside the
+    // updated `a`, not just rewrite the `# depends-on:` header.
+    let registry_dir = TempDir::new().unwrap();
+    let index = write_dep_index(registry_dir.path(), &[("a", "0.1.0", &[])]);
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["install", "a"])
+        .assert()
+        .success();
+
+    let before = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(before.contains("# >>> jtr:a@0.1.0 >>>"));
+    assert!(!before.contains("# >>> jtr:b@"));
+    assert!(!before.contains("# depends-on:"));
+
+    // a v2 declares a new dep on b.
+    write_dep_index(
+        registry_dir.path(),
+        &[("a", "0.2.0", &["b"]), ("b", "0.1.0", &[])],
+    );
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["update", "a"])
+        .assert()
+        .success()
+        .stdout(str::contains("installed"))
+        .stdout(str::contains("(dependency)"))
+        .stdout(str::contains("updated"))
+        .stdout(str::contains("0.2.0"));
+
+    let after = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(after.contains("# >>> jtr:a@0.2.0 >>>"), "a should be at v2");
+    assert!(
+        after.contains("# >>> jtr:b@0.1.0 >>>"),
+        "b should be installed by `update a` (regression for #8):\n{after}"
+    );
+    assert!(after.contains("# depends-on: b"));
+    assert!(
+        after.contains("b-noop:"),
+        "b's recipe body should be present"
+    );
+
+    // The dep must appear before the dependent in the file (topological order).
+    let pos_b = after.find("# >>> jtr:b@").unwrap();
+    let pos_a = after.find("# >>> jtr:a@0.2.0").unwrap();
+    assert!(
+        pos_b < pos_a,
+        "transitive dep `b` should be ordered before its dependent `a`"
+    );
+}
+
+#[test]
+fn update_with_no_arg_installs_newly_added_transitive_dependency() {
+    // Same shape as `update_installs_newly_added_transitive_dependency` but uses
+    // the no-arg form (`jtr update`) — verifies the multi-block loop also picks
+    // up new deps for each block it walks.
+    let registry_dir = TempDir::new().unwrap();
+    let index = write_dep_index(registry_dir.path(), &[("a", "0.1.0", &[])]);
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["install", "a"])
+        .assert()
+        .success();
+
+    write_dep_index(
+        registry_dir.path(),
+        &[("a", "0.2.0", &["b"]), ("b", "0.1.0", &[])],
+    );
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .arg("update")
+        .assert()
+        .success();
+
+    let after = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(after.contains("# >>> jtr:a@0.2.0 >>>"));
+    assert!(after.contains("# >>> jtr:b@0.1.0 >>>"));
+}
+
+#[test]
+fn update_bumps_existing_transitive_dependency_to_latest() {
+    // When the dep is *already* installed (unpinned) and a newer version
+    // publishes, `update <dependent>` should also bump the dep. This matches
+    // install's "always upsert" semantics and is the symmetric expansion called
+    // out alongside #8.
+    let registry_dir = TempDir::new().unwrap();
+    let index = write_dep_index(
+        registry_dir.path(),
+        &[("a", "0.1.0", &["b"]), ("b", "0.1.0", &[])],
+    );
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["install", "a"])
+        .assert()
+        .success();
+
+    // Bump only b.
+    write_dep_index(
+        registry_dir.path(),
+        &[("a", "0.1.0", &["b"]), ("b", "0.2.0", &[])],
+    );
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["update", "a"])
+        .assert()
+        .success();
+
+    let after = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(
+        after.contains("# >>> jtr:b@0.2.0 >>>"),
+        "b should have been bumped via `update a`:\n{after}"
+    );
+    assert!(after.contains("# >>> jtr:a@0.1.0 >>>"));
+}
+
+/// Same shape as `write_dep_index` but for one of the recipes ships at multiple
+/// versions and is enumerated under `versions: [...]`. Lets a test pin a
+/// transitive dep to a specific version. `multi.1[0]` is the published latest.
+fn write_dep_index_with_multiversion(
+    dir: &Path,
+    single: &[(&str, &str, &[&str])],
+    multi: (&str, &[&str]),
+) -> String {
+    let (multi_name, multi_versions) = multi;
+    assert!(!multi_versions.is_empty());
+    let recipes_dir = dir.join("recipes");
+    fs::create_dir_all(&recipes_dir).unwrap();
+
+    let mut index_entries: Vec<String> = Vec::new();
+
+    for (name, version, deps) in single {
+        let deps_json = deps
+            .iter()
+            .map(|d| format!("\"{}\"", d))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let manifest = format!(
+            r#"{{
+  "name": "{name}",
+  "version": "{version}",
+  "description": "fixture {name}",
+  "dependencies": [{deps_json}],
+  "targets": {{
+    "just": {{
+      "snippet": "{name}-noop:\n    @echo {name}-{version}\n"
+    }}
+  }}
+}}"#
+        );
+        fs::write(recipes_dir.join(format!("{name}.json")), &manifest).unwrap();
+        let sha = sha256_hex(manifest.as_bytes());
+        index_entries.push(format!(
+            r#"    {{
+      "name": "{name}",
+      "version": "{version}",
+      "description": "fixture {name}",
+      "manifest_url": "recipes/{name}.json",
+      "targets": ["just"],
+      "sha256": "{sha}"
+    }}"#
+        ));
+    }
+
+    let mut version_entries: Vec<String> = Vec::new();
+    let mut latest_manifest_url = String::new();
+    let mut latest_sha = String::new();
+    for (idx, version) in multi_versions.iter().enumerate() {
+        let manifest = format!(
+            r#"{{
+  "name": "{multi_name}",
+  "version": "{version}",
+  "description": "fixture {multi_name} v{version}",
+  "targets": {{
+    "just": {{
+      "snippet": "{multi_name}-noop:\n    @echo marker-{version}\n"
+    }}
+  }}
+}}"#
+        );
+        let path = if idx == 0 {
+            format!("{multi_name}.json")
+        } else {
+            format!("{multi_name}/{version}.json")
+        };
+        let on_disk = recipes_dir.join(&path);
+        fs::create_dir_all(on_disk.parent().unwrap()).unwrap();
+        fs::write(&on_disk, &manifest).unwrap();
+        let sha = sha256_hex(manifest.as_bytes());
+        if idx == 0 {
+            latest_manifest_url = format!("recipes/{path}");
+            latest_sha = sha.clone();
+        }
+        version_entries.push(format!(
+            r#"{{
+        "version": "{version}",
+        "manifest_url": "recipes/{path}",
+        "sha256": "{sha}"
+      }}"#
+        ));
+    }
+
+    let latest_version = multi_versions[0];
+    index_entries.push(format!(
+        r#"    {{
+      "name": "{multi_name}",
+      "version": "{latest_version}",
+      "description": "fixture {multi_name}",
+      "manifest_url": "{latest_manifest_url}",
+      "targets": ["just"],
+      "sha256": "{latest_sha}",
+      "versions": [
+        {}
+      ]
+    }}"#,
+        version_entries.join(",\n        ")
+    ));
+
+    let index = format!(
+        r#"{{
+  "version": 1,
+  "recipes": [
+{}
+  ]
+}}"#,
+        index_entries.join(",\n")
+    );
+    fs::write(dir.join("index.json"), index).unwrap();
+    format!("file://{}/index.json", dir.display())
+}
+
+#[test]
+fn update_respects_pinned_transitive_dependency() {
+    // The blind-spot the advisor flagged on PR for #8: when a transitive dep is
+    // already installed *with a pin* (via `jtr install <dep>@<version>`), a
+    // subsequent `jtr update <dependent>` must NOT silently bump the dep to
+    // latest. The pin propagates through `resolve_install_order` via the
+    // installed_pins lookup.
+    let registry_dir = TempDir::new().unwrap();
+    let index = write_dep_index_with_multiversion(
+        registry_dir.path(),
+        &[("a", "0.1.0", &["b"])],
+        ("b", &["0.2.0", "0.1.0"]),
+    );
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    // Install a — pulls in b@0.2.0 (latest, no pin).
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["install", "a"])
+        .assert()
+        .success();
+
+    // Pin b at 0.1.0 deliberately.
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["install", "b@0.1.0"])
+        .assert()
+        .success();
+
+    let pre = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(pre.contains("# >>> jtr:b@0.1.0 >>>"), "pre-update:\n{pre}");
+    assert!(pre.contains("# pinned: 0.1.0"));
+
+    // Now publish a@0.2.0 — still depends on b — and run `update a`.
+    let index = write_dep_index_with_multiversion(
+        registry_dir.path(),
+        &[("a", "0.2.0", &["b"])],
+        ("b", &["0.2.0", "0.1.0"]),
+    );
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["update", "a"])
+        .assert()
+        .success();
+
+    let after = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(
+        after.contains("# >>> jtr:a@0.2.0 >>>"),
+        "a should be bumped"
+    );
+    assert!(
+        after.contains("# >>> jtr:b@0.1.0 >>>"),
+        "b must stay at pinned 0.1.0, not bump to 0.2.0:\n{after}"
+    );
+    assert!(
+        after.contains("# pinned: 0.1.0"),
+        "pin marker must survive across update of dependent:\n{after}"
+    );
+    assert!(after.contains("marker-0.1.0"));
+    assert!(!after.contains("marker-0.2.0"));
+}
+
+#[test]
+fn install_respects_existing_pinned_transitive_dependency() {
+    // Symmetric to `update_respects_pinned_transitive_dependency`: installing a
+    // dependent whose dep is already pinned on disk must not bump the dep.
+    let registry_dir = TempDir::new().unwrap();
+    let index = write_dep_index_with_multiversion(
+        registry_dir.path(),
+        &[("a", "0.1.0", &["b"])],
+        ("b", &["0.2.0", "0.1.0"]),
+    );
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    // Pin b first.
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["install", "b@0.1.0"])
+        .assert()
+        .success();
+
+    // Now install a — its transitive dep b is already on disk pinned at 0.1.0.
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["install", "a"])
+        .assert()
+        .success();
+
+    let body = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(body.contains("# >>> jtr:a@0.1.0 >>>"));
+    assert!(
+        body.contains("# >>> jtr:b@0.1.0 >>>"),
+        "b must stay at pinned 0.1.0 after `install a`:\n{body}"
+    );
+    assert!(body.contains("# pinned: 0.1.0"));
+    assert!(body.contains("marker-0.1.0"));
+    assert!(!body.contains("marker-0.2.0"));
+}
