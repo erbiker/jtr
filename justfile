@@ -55,6 +55,7 @@ smoke: build
     set -euo pipefail
     BIN="$PWD/target/debug/jtr"
     INDEX="file://$PWD/jtr-index/index.json"
+    CURATED="$PWD/jtr-index"
     DEMO=$(mktemp -d)
     trap "rm -rf $DEMO" EXIT
     cd "$DEMO"
@@ -67,6 +68,14 @@ smoke: build
     just --justfile justfile --list >/dev/null
     JTR_INDEX_URL="$INDEX" "$BIN" remove postgres-dev
     JTR_INDEX_URL="$INDEX" "$BIN" list
+    # Lint the curated index — should pass cleanly.
+    "$BIN" lint --tap "$CURATED"
+    # Scaffold + lint round trip in an isolated tap.
+    TAP=$(mktemp -d)
+    printf '{\n  "version": 1,\n  "recipes": []\n}\n' > "$TAP/index.json"
+    (cd "$TAP" && "$BIN" scaffold recipe demo-recipe)
+    "$BIN" lint --tap "$TAP" --fix
+    rm -rf "$TAP"
     echo "smoke test ok"
 
 # Remove build artifacts.

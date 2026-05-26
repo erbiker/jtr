@@ -211,6 +211,19 @@ jtr diff postgres-dev                  # exit 0 if identical, 1 if there's a dif
 
 `jtr diff` is a CI-friendly drop-in for "are my recipes current": exit 0 means no diff, exit 1 means the on-disk block doesn't match (drifted, out-of-date, or never installed). Pinned blocks diff against their pinned version, not latest — pinning is a deliberate freeze, so drift against latest is `jtr doctor`'s job, not `diff`'s.
 
+### Author a recipe: `jtr scaffold recipe` + `jtr lint`
+
+```sh
+jtr scaffold recipe my-recipe          # creates my-recipe.json (or recipes/my-recipe.json in a tap)
+jtr lint my-recipe.json                # quick local validation while authoring
+jtr lint --tap path/to/tap             # validate a whole tap (index + every manifest + checksums)
+jtr lint --tap path/to/tap --fix       # recompute sha256 fields in index.json
+```
+
+`jtr scaffold recipe <name>` writes a manifest skeleton with placeholders for the description, snippet, and tool list. If your current directory contains an `index.json` (i.e. you're inside a tap repo), it also appends a stub entry to the index and leaves the checksum for `lint --fix` to compute; otherwise it writes a bare `<name>.json` so you can copy/edit it freely. Use `--target task` to scaffold a Taskfile-shaped snippet instead of the default `just` shape.
+
+`jtr lint <manifest>` validates a single manifest's schema, snippet syntax (by invoking `just`/`task` on a temp file when those binaries are on `PATH`), and the listed shell tools. `jtr lint --tap <root>` extends those checks across an entire tap: schema + snippet for every referenced manifest, name/version agreement between manifest and index entry, and `sha256` consistency. `--fix` only repairs checksums (adds the field when missing, replaces it when stale); other findings are reported but never auto-fixed. The fix preserves the index's existing formatting via targeted string surgery, so `--fix` is safe to run repeatedly on a well-formed file.
+
 ### Diagnose with `jtr doctor`
 
 ```sh

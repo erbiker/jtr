@@ -2336,3 +2336,354 @@ fn install_respects_existing_pinned_transitive_dependency() {
     assert!(body.contains("marker-0.1.0"));
     assert!(!body.contains("marker-0.2.0"));
 }
+
+// --- jtr scaffold + jtr lint -------------------------------------------------
+
+/// Write an empty tap layout (index.json with no recipes, no `recipes/` dir).
+fn empty_tap(dir: &Path) {
+    let index = "{\n  \"version\": 1,\n  \"recipes\": []\n}\n";
+    fs::write(dir.join("index.json"), index).unwrap();
+}
+
+#[test]
+fn scaffold_recipe_in_standalone_dir_writes_only_the_manifest() {
+    let dir = TempDir::new().unwrap();
+    jtr()
+        .current_dir(dir.path())
+        .args(["scaffold", "recipe", "my-recipe"])
+        .assert()
+        .success()
+        .stdout(str::contains("my-recipe.json"));
+
+    let manifest_path = dir.path().join("my-recipe.json");
+    assert!(manifest_path.exists(), "manifest should be at cwd root");
+    assert!(
+        !dir.path().join("recipes").exists(),
+        "no recipes/ dir should be created in standalone mode"
+    );
+    let body = fs::read_to_string(&manifest_path).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("scaffold output is JSON");
+    assert_eq!(parsed["name"], "my-recipe");
+    assert_eq!(parsed["version"], "0.1.0");
+    assert!(parsed["targets"]["just"]["snippet"].is_string());
+}
+
+#[test]
+fn scaffold_recipe_in_tap_repo_writes_manifest_and_appends_index_entry() {
+    let dir = TempDir::new().unwrap();
+    empty_tap(dir.path());
+    jtr()
+        .current_dir(dir.path())
+        .args(["scaffold", "recipe", "widget"])
+        .assert()
+        .success()
+        .stdout(str::contains("recipes/widget.json"))
+        .stdout(str::contains("appended stub entry"));
+
+    let manifest_path = dir.path().join("recipes/widget.json");
+    assert!(manifest_path.exists(), "manifest should be in recipes/");
+
+    let index_text = fs::read_to_string(dir.path().join("index.json")).unwrap();
+    let index: serde_json::Value = serde_json::from_str(&index_text).expect("index is JSON");
+    let recipes = index["recipes"].as_array().expect("recipes array");
+    assert_eq!(recipes.len(), 1);
+    assert_eq!(recipes[0]["name"], "widget");
+    assert_eq!(recipes[0]["manifest_url"], "recipes/widget.json");
+    assert!(
+        recipes[0].get("sha256").is_none(),
+        "scaffold leaves sha256 absent; `lint --fix` fills it in. got: {recipes:?}"
+    );
+}
+
+#[test]
+fn scaffold_recipe_refuses_to_overwrite_an_existing_manifest() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("foo.json"), "{}").unwrap();
+    jtr()
+        .current_dir(dir.path())
+        .args(["scaffold", "recipe", "foo"])
+        .assert()
+        .failure()
+        .stderr(str::contains("already exists"));
+}
+
+#[test]
+fn scaffold_recipe_refuses_to_overwrite_an_existing_index_entry() {
+    let dir = TempDir::new().unwrap();
+    let index = r#"{
+  "version": 1,
+  "recipes": [
+    {
+      "name": "widget",
+      "version": "0.1.0",
+      "description": "x",
+      "manifest_url": "recipes/widget.json",
+      "targets": ["just"]
+    }
+  ]
+}
+"#;
+    fs::write(dir.path().join("index.json"), index).unwrap();
+    jtr()
+        .current_dir(dir.path())
+        .args(["scaffold", "recipe", "widget"])
+        .assert()
+        .failure()
+        .stderr(str::contains("already has an entry"));
+}
+
+#[test]
+fn lint_passes_a_valid_manifest() {
+    let dir = TempDir::new().unwrap();
+    let manifest = r#"{
+  "name": "ok",
+  "version": "0.1.0",
+  "description": "a fine recipe",
+  "shells_out_to": [],
+  "targets": {
+    "just": {
+      "snippet": "ok:\n    @echo ok\n"
+    }
+  }
+}"#;
+    let path = dir.path().join("ok.json");
+    fs::write(&path, manifest).unwrap();
+    jtr()
+        .arg("lint")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout(str::contains("passed lint"));
+}
+
+#[test]
+fn lint_detects_schema_breakage() {
+    let dir = TempDir::new().unwrap();
+    let broken = r#"{"name": "x"}"#;
+    let path = dir.path().join("broken.json");
+    fs::write(&path, broken).unwrap();
+    jtr().arg("lint").arg(&path).assert().failure();
+}
+
+fn just_on_path() -> bool {
+    let path = match std::env::var_os("PATH") {
+        Some(p) => p,
+        None => return false,
+    };
+    std::env::split_paths(&path).any(|d| d.join("just").is_file())
+}
+
+#[test]
+fn lint_detects_invalid_just_snippet_when_just_is_on_path() {
+    if !just_on_path() {
+        // Skip on runners without `just` installed; matches lint's documented
+        // graceful-fallback behaviour. The unit test against the mismatch
+        // detector covers the schema path regardless.
+        eprintln!("skipping: `just` not on PATH");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    // `: not_a_recipe :` is not a valid `just` recipe header.
+    let manifest = r#"{
+  "name": "bad",
+  "version": "0.1.0",
+  "description": "broken snippet",
+  "targets": {
+    "just": {
+      "snippet": "this is not valid just syntax!!!\n@@@\n"
+    }
+  }
+}"#;
+    let path = dir.path().join("bad.json");
+    fs::write(&path, manifest).unwrap();
+    jtr()
+        .arg("lint")
+        .arg(&path)
+        .assert()
+        .failure()
+        .stdout(str::contains("snippet"));
+}
+
+#[test]
+fn lint_tap_validates_a_whole_tap_fixture() {
+    let dir = TempDir::new().unwrap();
+    // Build a minimal but coherent tap: index + recipe with correct sha.
+    let manifest = "{\n  \"name\": \"alpha\",\n  \"version\": \"0.1.0\",\n  \"description\": \"alpha recipe\",\n  \"targets\": {\n    \"just\": {\n      \"snippet\": \"alpha:\\n    @echo alpha\\n\"\n    }\n  }\n}";
+    let recipes_dir = dir.path().join("recipes");
+    fs::create_dir(&recipes_dir).unwrap();
+    fs::write(recipes_dir.join("alpha.json"), manifest).unwrap();
+    let sha = sha256_hex(manifest.as_bytes());
+    let index = format!(
+        "{{\n  \"version\": 1,\n  \"recipes\": [\n    {{\n      \"name\": \"alpha\",\n      \"version\": \"0.1.0\",\n      \"description\": \"alpha recipe\",\n      \"manifest_url\": \"recipes/alpha.json\",\n      \"targets\": [\"just\"],\n      \"sha256\": \"{sha}\"\n    }}\n  ]\n}}\n"
+    );
+    fs::write(dir.path().join("index.json"), &index).unwrap();
+
+    jtr()
+        .args(["lint", "--tap"])
+        .arg(dir.path())
+        .assert()
+        .success()
+        .stdout(str::contains("passed lint"));
+}
+
+#[test]
+fn lint_tap_detects_sha_mismatch_and_fix_repairs_it() {
+    let dir = TempDir::new().unwrap();
+    let manifest = "{\n  \"name\": \"alpha\",\n  \"version\": \"0.1.0\",\n  \"description\": \"alpha recipe\",\n  \"targets\": {\n    \"just\": {\n      \"snippet\": \"alpha:\\n    @echo alpha\\n\"\n    }\n  }\n}";
+    let recipes_dir = dir.path().join("recipes");
+    fs::create_dir(&recipes_dir).unwrap();
+    fs::write(recipes_dir.join("alpha.json"), manifest).unwrap();
+    let real_sha = sha256_hex(manifest.as_bytes());
+    let bogus_sha = "0".repeat(64);
+    let index = format!(
+        "{{\n  \"version\": 1,\n  \"recipes\": [\n    {{\n      \"name\": \"alpha\",\n      \"version\": \"0.1.0\",\n      \"description\": \"alpha recipe\",\n      \"manifest_url\": \"recipes/alpha.json\",\n      \"targets\": [\"just\"],\n      \"sha256\": \"{bogus_sha}\"\n    }}\n  ]\n}}\n"
+    );
+    fs::write(dir.path().join("index.json"), &index).unwrap();
+
+    jtr()
+        .args(["lint", "--tap"])
+        .arg(dir.path())
+        .assert()
+        .failure()
+        .stdout(str::contains("sha256 mismatch"));
+
+    jtr()
+        .args(["lint", "--tap"])
+        .arg(dir.path())
+        .arg("--fix")
+        .assert()
+        .success()
+        .stdout(str::contains("updated sha256"));
+
+    let after = fs::read_to_string(dir.path().join("index.json")).unwrap();
+    assert!(
+        after.contains(&format!("\"sha256\": \"{real_sha}\"")),
+        "index should contain the correct sha after --fix:\n{after}"
+    );
+    assert!(
+        !after.contains(&bogus_sha),
+        "bogus sha must be gone after --fix"
+    );
+}
+
+#[test]
+fn lint_tap_fix_adds_missing_sha_field() {
+    let dir = TempDir::new().unwrap();
+    let manifest = "{\n  \"name\": \"alpha\",\n  \"version\": \"0.1.0\",\n  \"description\": \"alpha recipe\",\n  \"targets\": {\n    \"just\": {\n      \"snippet\": \"alpha:\\n    @echo alpha\\n\"\n    }\n  }\n}";
+    let recipes_dir = dir.path().join("recipes");
+    fs::create_dir(&recipes_dir).unwrap();
+    fs::write(recipes_dir.join("alpha.json"), manifest).unwrap();
+    // Index without any sha256 field for the entry.
+    let index = "{\n  \"version\": 1,\n  \"recipes\": [\n    {\n      \"name\": \"alpha\",\n      \"version\": \"0.1.0\",\n      \"description\": \"alpha recipe\",\n      \"manifest_url\": \"recipes/alpha.json\",\n      \"targets\": [\"just\"]\n    }\n  ]\n}\n";
+    fs::write(dir.path().join("index.json"), index).unwrap();
+
+    jtr()
+        .args(["lint", "--tap"])
+        .arg(dir.path())
+        .arg("--fix")
+        .assert()
+        .success()
+        .stdout(str::contains("added sha256"));
+
+    let after = fs::read_to_string(dir.path().join("index.json")).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&after).expect("still valid JSON");
+    let added_sha = parsed["recipes"][0]["sha256"]
+        .as_str()
+        .expect("sha256 should have been inserted");
+    assert_eq!(added_sha, sha256_hex(manifest.as_bytes()));
+}
+
+#[test]
+fn lint_fix_without_tap_errors_with_helpful_message() {
+    let dir = TempDir::new().unwrap();
+    let manifest = r#"{"name": "x", "version": "0.1.0", "description": "y", "targets": {"just": {"snippet": "x:\n    @echo x\n"}}}"#;
+    let path = dir.path().join("x.json");
+    fs::write(&path, manifest).unwrap();
+    jtr()
+        .arg("lint")
+        .arg(&path)
+        .arg("--fix")
+        .assert()
+        .failure()
+        .stderr(str::contains("--fix requires --tap"));
+}
+
+#[test]
+fn lint_tap_detects_field_drift_between_manifest_and_index() {
+    let dir = TempDir::new().unwrap();
+    let manifest = "{\n  \"name\": \"alpha\",\n  \"version\": \"0.2.0\",\n  \"description\": \"alpha recipe\",\n  \"targets\": {\n    \"just\": {\n      \"snippet\": \"alpha:\\n    @echo alpha\\n\"\n    }\n  }\n}";
+    let recipes_dir = dir.path().join("recipes");
+    fs::create_dir(&recipes_dir).unwrap();
+    fs::write(recipes_dir.join("alpha.json"), manifest).unwrap();
+    let sha = sha256_hex(manifest.as_bytes());
+    // Index claims version 0.1.0 while manifest says 0.2.0 — drift.
+    let index = format!(
+        "{{\n  \"version\": 1,\n  \"recipes\": [\n    {{\n      \"name\": \"alpha\",\n      \"version\": \"0.1.0\",\n      \"description\": \"alpha recipe\",\n      \"manifest_url\": \"recipes/alpha.json\",\n      \"targets\": [\"just\"],\n      \"sha256\": \"{sha}\"\n    }}\n  ]\n}}\n"
+    );
+    fs::write(dir.path().join("index.json"), &index).unwrap();
+    jtr()
+        .args(["lint", "--tap"])
+        .arg(dir.path())
+        .assert()
+        .failure()
+        .stdout(str::contains("does not match"));
+}
+
+#[test]
+fn lint_warns_when_shells_out_to_lists_missing_tool() {
+    let dir = TempDir::new().unwrap();
+    let manifest = r#"{
+  "name": "needs-ghost",
+  "version": "0.1.0",
+  "description": "uses a nonexistent tool",
+  "shells_out_to": ["definitely-not-a-real-tool-xyz123"],
+  "targets": {
+    "just": {
+      "snippet": "needs-ghost:\n    @echo hi\n"
+    }
+  }
+}"#;
+    let path = dir.path().join("needs-ghost.json");
+    fs::write(&path, manifest).unwrap();
+    // Exit 0 because PATH-missing is a warning, not an error — but the
+    // warning must surface on stdout so authors notice before publishing.
+    jtr()
+        .arg("lint")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout(str::contains("definitely-not-a-real-tool-xyz123"))
+        .stdout(str::contains("PATH"));
+}
+
+#[test]
+fn scaffold_then_lint_fix_round_trip_succeeds() {
+    let dir = TempDir::new().unwrap();
+    empty_tap(dir.path());
+    jtr()
+        .current_dir(dir.path())
+        .args(["scaffold", "recipe", "demo"])
+        .assert()
+        .success();
+
+    // Replace the placeholder description so lint doesn't warn — exercises the
+    // "user hand-edits the manifest before publishing" pattern.
+    let manifest_path = dir.path().join("recipes/demo.json");
+    let original = fs::read_to_string(&manifest_path).unwrap();
+    let edited = original.replace("TODO: one-line description", "Demo recipe for testing");
+    fs::write(&manifest_path, edited).unwrap();
+
+    jtr()
+        .args(["lint", "--tap"])
+        .arg(dir.path())
+        .arg("--fix")
+        .assert()
+        .success();
+
+    // After --fix, plain `lint --tap` (no --fix) should be clean.
+    jtr()
+        .args(["lint", "--tap"])
+        .arg(dir.path())
+        .assert()
+        .success();
+}
