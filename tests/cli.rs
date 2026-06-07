@@ -2687,3 +2687,201 @@ fn scaffold_then_lint_fix_round_trip_succeeds() {
         .assert()
         .success();
 }
+
+#[test]
+fn info_prints_metadata_for_a_curated_recipe() {
+    let config_dir = TempDir::new().unwrap();
+
+    let assert = jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["info", "postgres-dev"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    // Stable fields only — the bundled sha changes whenever the manifest is
+    // edited (`lint --fix` recomputes it), so the exact checksum is asserted in
+    // the temp-index JSON test where the test computes it itself.
+    assert!(stdout.contains("postgres-dev"), "got:\n{stdout}");
+    assert!(
+        stdout.contains("Local PostgreSQL development environment"),
+        "info should print the description, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("curated"),
+        "info should label the source, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("docker"),
+        "info should list the shelled-out binary, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("0.1.0"),
+        "info should print the version, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn info_works_with_no_project_file_present() {
+    // The defining difference from show/diff: `info` describes the recipe, not
+    // how it lands in a project file, so it must succeed in a directory with no
+    // justfile or Taskfile. Guards against a future refactor re-adding
+    // target::resolve to the info path.
+    let empty_dir = TempDir::new().unwrap();
+    let config_dir = TempDir::new().unwrap();
+
+    jtr()
+        .current_dir(empty_dir.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["info", "postgres-dev"])
+        .assert()
+        .success()
+        .stdout(str::contains("postgres-dev"));
+}
+
+#[test]
+fn info_describes_a_tap_recipe() {
+    let config_dir = TempDir::new().unwrap();
+    let tap_dir = TempDir::new().unwrap();
+    let tap_index = write_tap_index(tap_dir.path(), "fancy-build", "0.1.0", "tap-marker");
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "add", "alice/recipes", "--url", &tap_index])
+        .assert()
+        .success();
+
+    let assert = jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["info", "alice/recipes/fancy-build"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.contains("fancy-build"), "got:\n{stdout}");
+    assert!(
+        stdout.contains("alice/recipes"),
+        "info should label the tap source, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn info_with_pin_shows_the_requested_version() {
+    let config_dir = TempDir::new().unwrap();
+    let index_dir = TempDir::new().unwrap();
+    let index_url = write_multi_version_index(index_dir.path(), "demo", &["0.2.0", "0.1.0"]);
+
+    let assert = jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["info", "demo@0.1.0"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(
+        stdout.contains("demo @0.1.0"),
+        "info @0.1.0 should head with the pinned version, got:\n{stdout}"
+    );
+    // The full version history is still listed even when a single version is pinned.
+    assert!(
+        stdout.contains("0.2.0"),
+        "info should still list every published version, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn info_json_is_machine_readable() {
+    let config_dir = TempDir::new().unwrap();
+    let registry_dir = TempDir::new().unwrap();
+    let index_url = write_postgres_dev_index(registry_dir.path(), "0.1.0");
+
+    let assert = jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["info", "postgres-dev", "--json"])
+        .assert()
+        .success();
+    let stdout = assert.get_output().stdout.clone();
+
+    // Parse the actual contract, not a substring — this is the machine-readable surface.
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&stdout).expect("info --json must emit valid JSON on stdout");
+
+    assert_eq!(parsed["name"], "postgres-dev");
+    assert_eq!(parsed["version"], "0.1.0");
+    assert_eq!(parsed["source"], "curated");
+    assert_eq!(parsed["shells_out_to"][0], "docker");
+    assert_eq!(parsed["targets"][0], "just");
+
+    // The checksum must be the full 64-char sha — provenance vetting is the
+    // whole point, and a truncated hash can't verify what's about to install.
+    let manifest_bytes = fs::read(registry_dir.path().join("recipes/postgres-dev.json")).unwrap();
+    let expected_sha = sha256_hex(&manifest_bytes);
+    assert_eq!(parsed["checksum"], expected_sha);
+    assert_eq!(expected_sha.len(), 64);
+}
+
+#[test]
+fn info_lists_declared_dependencies() {
+    // The other fixtures all have empty dependencies; this exercises the
+    // populated `depends on` line and the non-empty JSON `dependencies` array —
+    // the field "what it depends on" is half the point of `info` for vetting.
+    let config_dir = TempDir::new().unwrap();
+    let registry_dir = TempDir::new().unwrap();
+    let index_url = write_dep_index(
+        registry_dir.path(),
+        &[("a", "0.1.0", &["b"]), ("b", "0.1.0", &[])],
+    );
+
+    let assert = jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["info", "a"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("depends on") && stdout.contains('b'),
+        "info should print declared dependencies, got:\n{stdout}"
+    );
+
+    let json_out = jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["info", "a", "--json"])
+        .assert()
+        .success();
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&json_out.get_output().stdout).expect("valid JSON");
+    assert_eq!(parsed["dependencies"][0], "b");
+}
+
+#[test]
+fn info_errors_when_recipe_does_not_exist() {
+    let config_dir = TempDir::new().unwrap();
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["info", "does-not-exist"])
+        .assert()
+        .failure()
+        .stderr(str::contains("not found"));
+}
+
+#[test]
+fn info_errors_when_tap_is_not_configured() {
+    let config_dir = TempDir::new().unwrap();
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["info", "ghost/repo/anything"])
+        .assert()
+        .failure()
+        .stderr(str::contains("tap 'ghost/repo' is not configured"));
+}
