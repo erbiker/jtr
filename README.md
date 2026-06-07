@@ -211,6 +211,19 @@ jtr diff postgres-dev                  # exit 0 if identical, 1 if there's a dif
 
 `jtr diff` is a CI-friendly drop-in for "are my recipes current": exit 0 means no diff, exit 1 means the on-disk block doesn't match (drifted, out-of-date, or never installed). Pinned blocks diff against their pinned version, not latest — pinning is a deliberate freeze, so drift against latest is `jtr doctor`'s job, not `diff`'s.
 
+### Inspect a recipe: `jtr info`
+
+To read a recipe's metadata — what it does, which versions exist, and crucially *what it can run on your machine* — without rendering or installing anything:
+
+```sh
+jtr info postgres-dev                   # description, versions, source, tools, deps, checksum
+jtr info postgres-dev@0.1.0             # ...for a specific published version
+jtr info alice/recipes/nice-thing       # ...from a community tap
+jtr info postgres-dev --json            # machine-readable, pipe into jq
+```
+
+`jtr info` describes the recipe rather than how it would land in your project, so it works in any directory — no justfile or Taskfile required. The `shells out to` line is the recipe's privilege surface: the binaries it will invoke. That, plus the source label and checksum, is exactly what you want to eyeball before installing a recipe from a tap you don't control. `--json` emits a stable shape (full 64-char checksum included) for scripting.
+
 ### Author a recipe: `jtr scaffold recipe` + `jtr lint`
 
 ```sh

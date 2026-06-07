@@ -93,6 +93,18 @@ pub enum Command {
         /// optional `@version` to compare against a specific published version.
         name: String,
     },
+    /// Print read-only metadata about a registry recipe — description, version
+    /// history, source, declared tools (privilege surface), dependencies, and
+    /// checksum. Useful for vetting a recipe (especially a tap recipe) before
+    /// installing. Works in any directory; never touches the project file.
+    Info {
+        /// Recipe name (e.g. postgres-dev or user/repo/recipe). Accepts an
+        /// optional `@version` to inspect a specific published version.
+        name: String,
+        /// Emit machine-readable JSON instead of the human-formatted summary.
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage community taps — extra indices outside the curated registry.
     Tap {
         #[command(subcommand)]
@@ -165,6 +177,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Diff { name } => {
             commands::diff::run(&index_url, &name, file_override.as_deref(), use_cache)
         }
+        Command::Info { name, json } => commands::info::run(&index_url, &name, json, use_cache),
         Command::Tap { command } => commands::tap::run(command),
         Command::Lint { path, tap, fix } => commands::lint::run(path, tap, fix),
         Command::Scaffold { command } => match command {
