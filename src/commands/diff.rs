@@ -101,7 +101,7 @@ pub fn run(
     );
 
     let installed_text = installed
-        .map(|_| extract_block_text(&existing, &block_name))
+        .map(|_| managed::extract_block_text(&existing, &block_name))
         .unwrap_or_default();
 
     if installed_text == rendered {
@@ -114,35 +114,10 @@ pub fn run(
     std::process::exit(1);
 }
 
-/// Pull the raw text of the named managed block out of `doc`, including the
-/// open and close marker lines. Returns an empty string if the block isn't
-/// found. The returned string always ends with `\n` so it diffs cleanly against
-/// `managed::render`'s output (which also ends with `\n`).
-fn extract_block_text(doc: &str, name: &str) -> String {
-    let open_prefix = managed::open_marker(name);
-    let close = managed::close_marker(name);
-    let close_trimmed = close.trim();
-
-    let lines: Vec<&str> = doc.lines().collect();
-    let Some(start) = lines
-        .iter()
-        .position(|l| l.trim_start().starts_with(&open_prefix))
-    else {
-        return String::new();
-    };
-    let Some(rel_end) = lines[start..]
-        .iter()
-        .position(|l| l.trim() == close_trimmed)
-    else {
-        return String::new();
-    };
-    let end = start + rel_end;
-    let mut out = lines[start..=end].join("\n");
-    out.push('\n');
-    out
-}
-
-fn print_unified_diff(block_name: &str, before: &str, after: &str) {
+/// Print a `git diff`-style unified diff between `before` and `after`, labelled
+/// with the block name. Shared with `jtr update --dry-run` so both render the
+/// same colourised output. An empty `before` is labelled `(not installed)`.
+pub(crate) fn print_unified_diff(block_name: &str, before: &str, after: &str) {
     let diff = TextDiff::from_lines(before, after);
     let before_label = if before.is_empty() {
         format!("a/{block_name} (not installed)")

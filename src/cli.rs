@@ -64,6 +64,11 @@ pub enum Command {
         /// reported and skipped.
         #[arg(long)]
         unpin: bool,
+        /// Preview what `jtr update` would change — print the plan and a unified
+        /// diff per block — without touching the project file. Exits 0 if nothing
+        /// would change, 1 otherwise (a drop-in CI "are my recipes current" gate).
+        #[arg(long)]
+        dry_run: bool,
     },
     /// List recipes already installed in the project file.
     #[command(alias = "ls")]
@@ -161,10 +166,15 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Remove { name, force } => {
             commands::remove::run(&name, force, file_override.as_deref())
         }
-        Command::Update { name, unpin } => commands::update::run(
+        Command::Update {
+            name,
+            unpin,
+            dry_run,
+        } => commands::update::run(
             &index_url,
             name.as_deref(),
             unpin,
+            dry_run,
             file_override.as_deref(),
             use_cache,
         ),

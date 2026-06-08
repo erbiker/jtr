@@ -199,6 +199,35 @@ pub fn upsert(doc: &str, name: &str, rendered: &str) -> Result<String> {
     Ok(merged)
 }
 
+/// Pull the raw text of the named managed block out of `doc`, including the
+/// open and close marker lines. Returns an empty string if the block isn't
+/// found. The returned string always ends with `\n` so it diffs cleanly against
+/// `render`'s output (which also ends with `\n`). Used by `jtr diff` and
+/// `jtr update --dry-run` to show the on-disk block as the "before" side.
+pub fn extract_block_text(doc: &str, name: &str) -> String {
+    let open_prefix = open_marker(name);
+    let close = close_marker(name);
+    let close_trimmed = close.trim();
+
+    let lines: Vec<&str> = doc.lines().collect();
+    let Some(start) = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with(&open_prefix))
+    else {
+        return String::new();
+    };
+    let Some(rel_end) = lines[start..]
+        .iter()
+        .position(|l| l.trim() == close_trimmed)
+    else {
+        return String::new();
+    };
+    let end = start + rel_end;
+    let mut out = lines[start..=end].join("\n");
+    out.push('\n');
+    out
+}
+
 fn parse_open(line: &str) -> Option<(String, String)> {
     // Match `# >>> jtr:<name>@<version> >>>`
     let line = line.trim_start();

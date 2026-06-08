@@ -10,6 +10,7 @@ pub fn run(
     index_url: &str,
     name: Option<&str>,
     unpin: bool,
+    dry_run: bool,
     file_override: Option<&str>,
     use_cache: bool,
 ) -> Result<()> {
@@ -44,12 +45,14 @@ pub fn run(
     let sources = Sources::load(index_url, use_cache)?;
 
     let mut current_doc = existing.clone();
-    let mut wrote_anything = false;
+    let mut changed = false;
 
     for block_name in &names_to_update {
         // Re-parse each iteration so transitive deps installed by an earlier
         // update_one call are visible to later ones (deduplicated as
-        // "already at version", not re-installed).
+        // "already at version", not re-installed). Under --dry-run the doc is
+        // still rebuilt in memory so the same dedup applies — it just never
+        // reaches disk.
         let blocks_now = managed::parse_all(&current_doc);
         let Some(block) = blocks_now.iter().find(|b| &b.name == block_name) else {
             // Earlier iteration removed this block somehow — nothing left to update.
@@ -62,12 +65,23 @@ pub fn run(
             &blocks_now,
             target.as_str(),
             unpin,
+            dry_run,
             &mut current_doc,
-            &mut wrote_anything,
+            &mut changed,
         )?;
     }
 
-    if wrote_anything {
+    if dry_run {
+        // Mirror `jtr diff`: a non-zero exit means "something would change", so
+        // `jtr update --dry-run` doubles as a CI "are my recipes current" gate.
+        // process::exit avoids anyhow's "Error:" prefix that `bail!` would add.
+        if changed {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    if changed {
         std::fs::write(&path, &current_doc)
             .with_context(|| format!("could not write {}", path.display()))?;
     }
@@ -75,21 +89,24 @@ pub fn run(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_one(
     sources: &Sources,
     block: &ManagedBlock,
     blocks_now: &[ManagedBlock],
     target_key: &str,
     unpin: bool,
+    dry_run: bool,
     current_doc: &mut String,
-    wrote_anything: &mut bool,
+    changed: &mut bool,
 ) -> Result<()> {
     let block_name = &block.name;
 
     // Pinned blocks are managed by `jtr install <name>@<version>`, not `jtr update`.
     // The user has explicitly asked for a specific version, so silently refreshing
     // them would defeat the pin. `--unpin` flips them back into the normal update
-    // flow and drops the pin marker.
+    // flow and drops the pin marker. The skip line prints identically under
+    // --dry-run — it already describes a non-action.
     if let Some(pin) = &block.pinned
         && !unpin
     {
@@ -133,22 +150,25 @@ fn update_one(
             block,
             target_key,
             unpin,
+            dry_run,
             current_doc,
-            wrote_anything,
+            changed,
         )?;
     }
 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_plan(
     plan: &Plan<'_>,
     blocks_now: &[ManagedBlock],
     root_block: &ManagedBlock,
     target_key: &str,
     unpin: bool,
+    dry_run: bool,
     current_doc: &mut String,
-    wrote_anything: &mut bool,
+    changed: &mut bool,
 ) -> Result<()> {
     let target_recipe = plan.manifest.targets.get(target_key).ok_or_else(|| {
         anyhow!(
@@ -179,7 +199,6 @@ fn apply_plan(
         &target_recipe.snippet,
     );
 
-    let new_doc = managed::upsert(current_doc, &plan.block_name, &rendered)?;
     let pre_existing = blocks_now.iter().find(|b| b.name == plan.block_name);
     let is_root = plan.block_name == root_block.name;
     let dep_suffix = if plan.is_dependency {
@@ -196,24 +215,48 @@ fn apply_plan(
         String::new()
     };
 
-    if new_doc == *current_doc {
-        println!(
-            "{} {} {} already at version {}{}{}",
-            "✓".green(),
-            plan.block_name.bold(),
-            "—".dimmed(),
-            plan.manifest.version,
-            pin_suffix,
-            dep_suffix
-        );
+    // Compare the rendered block against the block's *current on-disk text*, the
+    // same no-op check `jtr diff` uses. A whole-document comparison would be
+    // wrong: `upsert` appends the block to the end, so updating any non-last
+    // block changes the document by a pure positional move and would be reported
+    // as a spurious "refreshed"/"would refresh". `before` doubles as the "before"
+    // side of the --dry-run diff. It's `""` when the block isn't installed yet.
+    let before = managed::extract_block_text(current_doc, &plan.block_name);
+
+    // already-current is the *only* category --dry-run keeps silent, so a run
+    // with nothing to change produces empty output and exit 0 — matching
+    // `jtr diff`. Every other category prints: skip-pinned and gone in
+    // update_one, install/update/refresh/unpin below (with a diff under --dry-run).
+    if before == rendered {
+        if !dry_run {
+            println!(
+                "{} {} {} already at version {}{}{}",
+                "✓".green(),
+                plan.block_name.bold(),
+                "—".dimmed(),
+                plan.manifest.version,
+                pin_suffix,
+                dep_suffix
+            );
+        }
         return Ok(());
     }
 
+    // Green ✓ means "done"; under --dry-run nothing is written, so preview lines
+    // lead with the cyan info marker and a "would" verb instead.
+    let marker = if dry_run { "i".cyan() } else { "✓".green() };
+
     match pre_existing {
         None => {
+            let verb = if dry_run {
+                "would install"
+            } else {
+                "installed"
+            };
             println!(
-                "{} installed {} ({}){}{}",
-                "✓".green(),
+                "{} {} {} ({}){}{}",
+                marker,
+                verb,
                 plan.block_name.bold(),
                 plan.manifest.version,
                 pin_suffix,
@@ -222,17 +265,21 @@ fn apply_plan(
         }
         Some(prior) => {
             if is_root && root_block.pinned.is_some() && unpin {
+                let verb = if dry_run { "would unpin" } else { "unpinned" };
                 println!(
-                    "{} unpinned {} {} → {}",
-                    "✓".green(),
+                    "{} {} {} {} → {}",
+                    marker,
+                    verb,
                     plan.block_name.bold(),
                     format!("@{} (pinned)", root_block.version).dimmed(),
                     plan.manifest.version
                 );
             } else if prior.version != plan.manifest.version {
+                let verb = if dry_run { "would update" } else { "updated" };
                 println!(
-                    "{} updated {} {} → {}{}{}",
-                    "✓".green(),
+                    "{} {} {} {} → {}{}{}",
+                    marker,
+                    verb,
                     plan.block_name.bold(),
                     format!("@{}", prior.version).dimmed(),
                     plan.manifest.version,
@@ -240,11 +287,18 @@ fn apply_plan(
                     dep_suffix
                 );
             } else {
+                let (verb, note) = if dry_run {
+                    ("would refresh", "reverts manual edits to managed block")
+                } else {
+                    ("refreshed", "reverted manual edits to managed block")
+                };
                 println!(
-                    "{} refreshed {} {} (reverted manual edits to managed block){}{}",
-                    "✓".green(),
+                    "{} {} {} {} ({}){}{}",
+                    marker,
+                    verb,
                     plan.block_name.bold(),
                     format!("@{}", plan.manifest.version).dimmed(),
+                    note,
                     pin_suffix,
                     dep_suffix
                 );
@@ -252,7 +306,13 @@ fn apply_plan(
         }
     }
 
-    *current_doc = new_doc;
-    *wrote_anything = true;
+    // Under --dry-run, follow each change line with the same unified diff
+    // `jtr diff` would print, so one flag previews the whole update plan.
+    if dry_run {
+        crate::commands::diff::print_unified_diff(&plan.block_name, &before, &rendered);
+    }
+
+    *current_doc = managed::upsert(current_doc, &plan.block_name, &rendered)?;
+    *changed = true;
     Ok(())
 }

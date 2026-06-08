@@ -66,6 +66,8 @@ smoke: build
     JTR_INDEX_URL="$INDEX" "$BIN" diff rust-lint-format
     JTR_INDEX_URL="$INDEX" "$BIN" info redis-dev | grep -q 'curated'
     JTR_INDEX_URL="$INDEX" "$BIN" info redis-dev --json | grep -q '"source": "curated"'
+    # Freshly-installed blocks are current, so --dry-run is a silent exit-0 no-op.
+    test -z "$(JTR_INDEX_URL="$INDEX" "$BIN" update --dry-run)"
     JTR_INDEX_URL="$INDEX" "$BIN" list
     just --justfile justfile --list >/dev/null
     JTR_INDEX_URL="$INDEX" "$BIN" remove postgres-dev
