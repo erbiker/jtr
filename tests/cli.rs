@@ -2885,3 +2885,294 @@ fn info_errors_when_tap_is_not_configured() {
         .failure()
         .stderr(str::contains("tap 'ghost/repo' is not configured"));
 }
+
+#[test]
+fn update_dry_run_with_nothing_to_change_is_empty_and_exits_zero() {
+    // Mirrors `jtr diff` of an unmodified install: when every block is already
+    // current, --dry-run writes nothing, prints nothing, and exits 0.
+    let project = project_with_justfile("default:\n    @echo hi\n");
+    let config_dir = TempDir::new().unwrap();
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["install", "postgres-dev"])
+        .assert()
+        .success();
+    let before = fs::read_to_string(project.path().join("justfile")).unwrap();
+
+    let assert = jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["update", "--dry-run"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.is_empty(),
+        "no-op dry-run should produce empty stdout, got: {stdout:?}"
+    );
+
+    let after = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert_eq!(before, after, "dry-run must not modify the project file");
+}
+
+#[test]
+fn update_dry_run_previews_an_update_without_writing() {
+    // A newer version is available; --dry-run prints `would update` plus a
+    // unified diff (same engine as `jtr diff`), exits 1, and leaves the file
+    // untouched.
+    let project = project_with_justfile("default:\n    @echo hi\n");
+    let registry_dir = TempDir::new().unwrap();
+    let config_dir = TempDir::new().unwrap();
+
+    let v1 = write_postgres_dev_index(registry_dir.path(), "0.1.0");
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &v1)
+        .args(["install", "postgres-dev"])
+        .assert()
+        .success();
+    let before = fs::read_to_string(project.path().join("justfile")).unwrap();
+
+    let v2 = write_postgres_dev_index(registry_dir.path(), "0.2.0");
+    let assert = jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &v2)
+        .args(["update", "postgres-dev", "--dry-run"])
+        .assert()
+        .failure()
+        .code(1);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("would update"),
+        "dry-run should announce the would-update action, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("0.1.0") && stdout.contains("0.2.0"),
+        "dry-run should show the version transition, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("--- a/postgres-dev") && stdout.contains("+++ b/postgres-dev"),
+        "dry-run should print a unified-diff header, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("-    @echo marker-0.1.0") && stdout.contains("+    @echo marker-0.2.0"),
+        "dry-run diff should show the snippet change, got:\n{stdout}"
+    );
+
+    let after = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert_eq!(before, after, "dry-run must not modify the project file");
+}
+
+#[test]
+fn update_dry_run_lists_a_missing_transitive_dependency() {
+    // a@v2 adds a new dep on b. `update a --dry-run` should preview installing b
+    // (as a dependency) and updating a, exit 1, and write nothing — so b never
+    // lands on disk.
+    let registry_dir = TempDir::new().unwrap();
+    let config_dir = TempDir::new().unwrap();
+    let index = write_dep_index(registry_dir.path(), &[("a", "0.1.0", &[])]);
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["install", "a"])
+        .assert()
+        .success();
+    let before = fs::read_to_string(project.path().join("justfile")).unwrap();
+
+    write_dep_index(
+        registry_dir.path(),
+        &[("a", "0.2.0", &["b"]), ("b", "0.1.0", &[])],
+    );
+
+    let assert = jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &index)
+        .args(["update", "a", "--dry-run"])
+        .assert()
+        .failure()
+        .code(1);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("would install") && stdout.contains("(dependency)"),
+        "dry-run should preview installing the new dep b, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("would update"),
+        "dry-run should preview updating a, got:\n{stdout}"
+    );
+
+    let after = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert_eq!(before, after, "dry-run must not modify the project file");
+    assert!(
+        !after.contains("# >>> jtr:b@"),
+        "dry-run must not actually install b, got:\n{after}"
+    );
+}
+
+#[test]
+fn update_dry_run_with_unpin_previews_the_unpin_without_writing() {
+    // `--unpin --dry-run` should preview bumping a pinned block to latest and
+    // dropping the pin, exit 1, but leave the pin and the old snippet on disk.
+    let index_dir = TempDir::new().unwrap();
+    let config_dir = TempDir::new().unwrap();
+    let index_url = write_multi_version_index(index_dir.path(), "demo", &["0.2.0", "0.1.0"]);
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["install", "demo@0.1.0"])
+        .assert()
+        .success();
+    let before = fs::read_to_string(project.path().join("justfile")).unwrap();
+
+    let assert = jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["update", "demo", "--unpin", "--dry-run"])
+        .assert()
+        .failure()
+        .code(1);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("would unpin"),
+        "dry-run --unpin should announce the would-unpin action, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("0.1.0") && stdout.contains("0.2.0"),
+        "dry-run --unpin should show the version transition, got:\n{stdout}"
+    );
+
+    let after = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert_eq!(before, after, "dry-run must not modify the project file");
+    assert!(
+        after.contains("# pinned: 0.1.0"),
+        "pin must survive a dry-run --unpin, got:\n{after}"
+    );
+    assert!(
+        after.contains("marker-0.1.0") && !after.contains("marker-0.2.0"),
+        "dry-run --unpin must not bump the snippet, got:\n{after}"
+    );
+}
+
+#[test]
+fn update_dry_run_shows_pinned_skip_and_exits_zero() {
+    // Without --unpin a pinned block is a non-action, but the "pinned — skipping"
+    // line is still an enumerated plan outcome, so --dry-run prints it. Since
+    // nothing would change, the run exits 0. Guards against silently dropping the
+    // skip line from dry-run output.
+    let index_dir = TempDir::new().unwrap();
+    let config_dir = TempDir::new().unwrap();
+    let index_url = write_multi_version_index(index_dir.path(), "demo", &["0.2.0", "0.1.0"]);
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["install", "demo@0.1.0"])
+        .assert()
+        .success();
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &index_url)
+        .args(["update", "demo", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(str::contains("pinned to 0.1.0"))
+        .stdout(str::contains("skipping"));
+}
+
+#[test]
+fn update_dry_run_with_two_current_blocks_is_empty_and_exits_zero() {
+    // The single-block no-op case can't catch the upsert-reorder trap: only a
+    // *non-last* block triggers it. With two already-current blocks, dry-run must
+    // still be a silent exit-0 no-op — comparing block content, not the whole doc.
+    let project = project_with_justfile("default:\n    @echo hi\n");
+    let config_dir = TempDir::new().unwrap();
+
+    for recipe in ["postgres-dev", "rust-lint-format"] {
+        jtr()
+            .current_dir(project.path())
+            .env("JTR_CONFIG_DIR", config_dir.path())
+            .env("JTR_INDEX_URL", sample_index_url())
+            .args(["install", recipe])
+            .assert()
+            .success();
+    }
+    let before = fs::read_to_string(project.path().join("justfile")).unwrap();
+
+    let assert = jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["update", "--dry-run"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.is_empty(),
+        "two-block no-op dry-run should produce empty stdout, got:\n{stdout}"
+    );
+
+    let after = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert_eq!(before, after, "dry-run must not modify the project file");
+}
+
+#[test]
+fn update_no_arg_on_current_blocks_reports_already_current_not_refreshed() {
+    // Regression: `upsert` appends the block to the end, so a no-arg update over
+    // two current blocks used to move each one and report a spurious "refreshed
+    // (reverted manual edits)". With block-content no-op detection it must report
+    // "already at version" for both and leave the file byte-identical.
+    let project = project_with_justfile("default:\n    @echo hi\n");
+    let config_dir = TempDir::new().unwrap();
+
+    for recipe in ["postgres-dev", "rust-lint-format"] {
+        jtr()
+            .current_dir(project.path())
+            .env("JTR_CONFIG_DIR", config_dir.path())
+            .env("JTR_INDEX_URL", sample_index_url())
+            .args(["install", recipe])
+            .assert()
+            .success();
+    }
+    let before = fs::read_to_string(project.path().join("justfile")).unwrap();
+
+    let assert = jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .arg("update")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("already at version"),
+        "no-op update should report already-current, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("refreshed"),
+        "no-op update must not spuriously refresh unchanged blocks, got:\n{stdout}"
+    );
+
+    let after = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert_eq!(
+        before, after,
+        "a genuine no-op update must leave the file byte-identical"
+    );
+}

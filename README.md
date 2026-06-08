@@ -117,6 +117,15 @@ jtr update                 # update every jtr-managed recipe in this project
 
 `jtr update` is byte-identical no-op when the registry version matches what's installed and the managed block is unchanged. If you hand-edited the managed block, `jtr update` reverts it to canonical (`✓ refreshed postgres-dev @0.1.0`).
 
+#### Preview with `--dry-run`
+
+```sh
+jtr update --dry-run                  # preview what `jtr update` would change
+jtr update postgres-dev --dry-run     # ...for a single recipe
+```
+
+`--dry-run` walks the exact plan `jtr update` would execute — installs of newly-added transitive deps, version bumps, refreshes of drifted blocks — and prints a `jtr diff`-style unified diff per change, **without touching the project file**. It's `jtr diff` aggregated across the whole update: one flag instead of a `diff` call per recipe. Like `diff`, it exits `0` when nothing would change (silently) and `1` when something would, so it drops straight into CI as an "are my recipes current" gate. Pinned blocks are reported as skipped (add `--unpin` to preview bumping them).
+
 ### Pin to a specific version
 
 For reproducible setups across machines or CI runs, pin an install with `@<version>`:
