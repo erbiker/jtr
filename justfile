@@ -57,21 +57,41 @@ smoke: build
     INDEX="file://$PWD/jtr-index/index.json"
     CURATED="$PWD/jtr-index"
     DEMO=$(mktemp -d)
-    trap "rm -rf $DEMO" EXIT
+    # Isolate tap config so smoke is hermetic — no developer-local taps adding
+    # fetch latency or stderr noise.
+    export JTR_CONFIG_DIR=$(mktemp -d)
+    trap "rm -rf $DEMO $JTR_CONFIG_DIR" EXIT
+    # Capture-then-grep instead of `jtr ... | grep -q`: `grep -q` exits on the
+    # first match and closes the pipe, and jtr currently panics writing to the
+    # broken pipe (tracked separately). Running the producer to completion first
+    # sidesteps the race.
     cd "$DEMO"
     printf 'default:\n    @echo hi\n' > justfile
     JTR_INDEX_URL="$INDEX" "$BIN" install postgres-dev
     JTR_INDEX_URL="$INDEX" "$BIN" install rust-lint-format
-    JTR_INDEX_URL="$INDEX" "$BIN" show redis-dev | grep -q '^# >>> jtr:redis-dev@'
+    grep -q '^# >>> jtr:redis-dev@' <<<"$(JTR_INDEX_URL="$INDEX" "$BIN" show redis-dev)"
     JTR_INDEX_URL="$INDEX" "$BIN" diff rust-lint-format
-    JTR_INDEX_URL="$INDEX" "$BIN" info redis-dev | grep -q 'curated'
-    JTR_INDEX_URL="$INDEX" "$BIN" info redis-dev --json | grep -q '"source": "curated"'
+    grep -q 'curated' <<<"$(JTR_INDEX_URL="$INDEX" "$BIN" info redis-dev)"
+    grep -q '"source": "curated"' <<<"$(JTR_INDEX_URL="$INDEX" "$BIN" info redis-dev --json)"
     # Freshly-installed blocks are current, so --dry-run is a silent exit-0 no-op.
     test -z "$(JTR_INDEX_URL="$INDEX" "$BIN" update --dry-run)"
     JTR_INDEX_URL="$INDEX" "$BIN" list
     just --justfile justfile --list >/dev/null
     JTR_INDEX_URL="$INDEX" "$BIN" remove postgres-dev
     JTR_INDEX_URL="$INDEX" "$BIN" list
+    # --- Task (YAML) write target: install redis-dev into a Taskfile ---
+    TASKDEMO=$(mktemp -d)
+    printf "version: '3'\n\ntasks:\n  default:\n    cmds:\n      - task --list\n" > "$TASKDEMO/Taskfile.yml"
+    JTR_INDEX_URL="$INDEX" "$BIN" --file "$TASKDEMO/Taskfile.yml" install redis-dev
+    grep -q '^  # >>> jtr:redis-dev@' "$TASKDEMO/Taskfile.yml"
+    grep -q '^  redis-up:' "$TASKDEMO/Taskfile.yml"
+    grep -q 'redis-dev' <<<"$(JTR_INDEX_URL="$INDEX" "$BIN" --file "$TASKDEMO/Taskfile.yml" list)"
+    # A fresh install reads back identical, so --dry-run is a silent exit-0 no-op.
+    test -z "$(JTR_INDEX_URL="$INDEX" "$BIN" --file "$TASKDEMO/Taskfile.yml" update --dry-run)"
+    # If `task` is installed, the generated Taskfile must actually parse.
+    if command -v task >/dev/null 2>&1; then task -t "$TASKDEMO/Taskfile.yml" --list-all >/dev/null; fi
+    JTR_INDEX_URL="$INDEX" "$BIN" --file "$TASKDEMO/Taskfile.yml" remove redis-dev
+    rm -rf "$TASKDEMO"
     # Lint the curated index — should pass cleanly.
     "$BIN" lint --tap "$CURATED"
     # Scaffold + lint round trip in an isolated tap.

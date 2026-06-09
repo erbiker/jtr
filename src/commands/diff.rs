@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use colored::Colorize;
 use similar::{ChangeTag, TextDiff};
 
@@ -25,13 +25,6 @@ pub fn run(
     managed::validate_name(&recipe_name)?;
 
     let (path, target) = target::resolve(file_override)?;
-
-    if target == target::Target::Task {
-        bail!(
-            "writing into Taskfile.yml is not yet implemented (planned for v2). \
-             Use --file to point at a justfile to compare against."
-        );
-    }
 
     let existing = std::fs::read_to_string(&path)
         .with_context(|| format!("could not read {}", path.display()))?;
@@ -91,7 +84,8 @@ pub fn run(
     } else {
         installed.and_then(|b| b.pinned.as_deref())
     };
-    let rendered = managed::render(
+    let rendered = managed::render_block(
+        target,
         &block_name,
         &manifest.version,
         Some(&source_link),

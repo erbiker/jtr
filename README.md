@@ -17,7 +17,7 @@ jtr doctor                 # check for stale blocks, drift, missing tools
 jtr remove postgres-dev    # take it back out
 ```
 
-`jtr` writes its recipes into your `justfile` as a sentinel-delimited managed block — your hand-written recipes are untouched, and you can re-render or remove an installed block at any time.
+`jtr` writes its recipes into your `justfile` (or `Taskfile.yml`) as a sentinel-delimited managed block — your hand-written recipes are untouched, and you can re-render or remove an installed block at any time.
 
 > **Status: pre-alpha.** APIs and recipe formats will change. Pin your installs and expect rough edges. We're iterating in public; feedback in [Discussions](https://github.com/erbiker/jtr/discussions) is genuinely valued.
 
@@ -107,6 +107,30 @@ postgres-up:
 ```
 
 Then run `just postgres-up` as usual.
+
+#### Installing into a `Taskfile.yml`
+
+If your project uses [`task`](https://github.com/go-task/task) instead of `just`, `jtr` writes into your `Taskfile.yml` exactly the same way — provided the recipe declares a `task` target (the curated `redis-dev` does). The managed block is the same sentinel-delimited region, just nested under the top-level `tasks:` map:
+
+```yaml
+version: '3'
+
+tasks:
+  default:
+    cmds:
+      - task --list
+
+  # >>> jtr:redis-dev@0.1.0 >>>
+  # source: https://github.com/erbiker/jtr-index/tree/main/recipes/redis-dev
+  # do not edit manually; use `jtr update redis-dev` or `jtr remove redis-dev`
+  redis-up:
+    desc: Start a local Redis container (no persistence)
+    cmds:
+      - docker run --rm -d --name jtr-redis-dev ...
+  # <<< jtr:redis-dev <<<
+```
+
+`jtr` edits the YAML as text (it never re-serializes the file), so your other tasks, vars, includes, and comments are preserved byte-for-byte. `install`, `update`, `remove`, `list`, and `doctor` all behave identically against a Taskfile — there's no separate command set. The project file is auto-detected, or pass `--file ./Taskfile.yml`.
 
 ### Update an installed recipe
 
@@ -295,7 +319,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development workflow.
 
 The roadmap is tracked in [GitHub Issues](https://github.com/erbiker/jtr/issues) and discussed in [Discussions](https://github.com/erbiker/jtr/discussions). Near-term focus:
 
-- **Task (YAML) write target** — `task` users get full install support, not just detection.
 - **Split the registry into its own repo** — once external recipe contributions warrant it.
 
 ## Contributing

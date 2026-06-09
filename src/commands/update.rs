@@ -63,7 +63,7 @@ pub fn run(
             &sources,
             block,
             &blocks_now,
-            target.as_str(),
+            target,
             unpin,
             dry_run,
             &mut current_doc,
@@ -94,7 +94,7 @@ fn update_one(
     sources: &Sources,
     block: &ManagedBlock,
     blocks_now: &[ManagedBlock],
-    target_key: &str,
+    target: target::Target,
     unpin: bool,
     dry_run: bool,
     current_doc: &mut String,
@@ -148,7 +148,7 @@ fn update_one(
             plan,
             blocks_now,
             block,
-            target_key,
+            target,
             unpin,
             dry_run,
             current_doc,
@@ -164,12 +164,13 @@ fn apply_plan(
     plan: &Plan<'_>,
     blocks_now: &[ManagedBlock],
     root_block: &ManagedBlock,
-    target_key: &str,
+    target: target::Target,
     unpin: bool,
     dry_run: bool,
     current_doc: &mut String,
     changed: &mut bool,
 ) -> Result<()> {
+    let target_key = target.as_str();
     let target_recipe = plan.manifest.targets.get(target_key).ok_or_else(|| {
         anyhow!(
             "recipe '{}' does not support target '{}' (supports: {})",
@@ -190,7 +191,8 @@ fn apply_plan(
         .clone()
         .unwrap_or_else(|| plan.source.registry.base().to_string());
 
-    let rendered = managed::render(
+    let rendered = managed::render_block(
+        target,
         &plan.block_name,
         &plan.manifest.version,
         Some(&source_link),
@@ -312,7 +314,7 @@ fn apply_plan(
         crate::commands::diff::print_unified_diff(&plan.block_name, &before, &rendered);
     }
 
-    *current_doc = managed::upsert(current_doc, &plan.block_name, &rendered)?;
+    *current_doc = managed::upsert(target, current_doc, &plan.block_name, &rendered)?;
     *changed = true;
     Ok(())
 }

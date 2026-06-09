@@ -43,27 +43,6 @@ pub fn run(
         }
     }
 
-    // Task target is intentionally stubbed in v1 because it requires merging into existing YAML.
-    // Reached only when every recipe declares a task target — otherwise the per-recipe check
-    // above produces a more specific error.
-    if target == target::Target::Task {
-        let first = order
-            .first()
-            .expect("at least one recipe must be in the install order");
-        let snippet = first
-            .manifest
-            .targets
-            .get("task")
-            .map(|t| t.snippet.as_str())
-            .unwrap_or("");
-        bail!(
-            "{}: writing into Taskfile.yml is not yet implemented (planned for v2). \n\
-             Use --file to point at a justfile, or copy the recipe manually:\n\n{}",
-            "task target not yet supported".yellow(),
-            snippet
-        );
-    }
-
     let mut current_doc = existing.clone();
     let mut wrote_anything = false;
     let mut summaries: Vec<(String, &Plan, bool)> = Vec::new();
@@ -82,7 +61,8 @@ pub fn run(
             plan.source.registry.base().to_string()
         });
 
-        let rendered = managed::render(
+        let rendered = managed::render_block(
+            target,
             &plan.block_name,
             &plan.manifest.version,
             Some(&source_link),
@@ -91,7 +71,7 @@ pub fn run(
             &target_recipe.snippet,
         );
 
-        let new_doc = managed::upsert(&current_doc, &plan.block_name, &rendered)?;
+        let new_doc = managed::upsert(target, &current_doc, &plan.block_name, &rendered)?;
         let action = if new_doc == current_doc {
             "already-current"
         } else if already.iter().any(|b| b.name == plan.block_name) {

@@ -15,8 +15,8 @@
       "version": "0.1.0",
       "description": "Local Redis dev container with persistence disabled",
       "manifest_url": "recipes/redis-dev.json",
-      "targets": ["just"],
-      "sha256": "e3349815e777125884aaa120d73684c14078a0f141d9ef7eb0d84243a3e89d59"
+      "targets": ["just", "task"],
+      "sha256": "3a1e9e69a81e327575799466d820fda5163281b344c9e56dda1b0784520c2142"
     },
     {
       "name": "rust-lint-format",
