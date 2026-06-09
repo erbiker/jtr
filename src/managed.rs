@@ -1,5 +1,14 @@
 use anyhow::{Result, anyhow, bail};
 
+use crate::target::Target;
+
+/// Spaces a Task managed block is indented to nest under the top-level `tasks:`
+/// map. Fixed (not detected from the file): render and insertion must use the
+/// *same* indent or `jtr update`'s `extract_block_text == render_block` no-op
+/// check drifts and every update spuriously "refreshes". Mixed indentation
+/// across sibling YAML keys is valid, so a fixed 2 is always safe.
+const TASK_INDENT: usize = 2;
+
 /// Sentinel-delimited block embedded in the user's justfile/Taskfile.
 ///
 /// Format:
@@ -77,6 +86,51 @@ pub fn render(
     )
 }
 
+/// Render the managed block in the form appropriate for `target`. For Just this
+/// is the canonical column-0 block; for Task the same block indented by
+/// [`TASK_INDENT`] so it nests under the `tasks:` map. The result is what both
+/// the on-disk block and any re-render must equal, so update/diff no-op
+/// detection stays byte-exact across targets.
+#[allow(clippy::too_many_arguments)]
+pub fn render_block(
+    target: Target,
+    name: &str,
+    version: &str,
+    source: Option<&str>,
+    pinned: Option<&str>,
+    dependencies: &[String],
+    snippet: &str,
+) -> String {
+    let block = render(name, version, source, pinned, dependencies, snippet);
+    match target {
+        Target::Just => block,
+        Target::Task => indent_block(&block, TASK_INDENT),
+    }
+}
+
+/// Indent every non-blank line by `spaces`. Blank lines are left empty so the
+/// output carries no trailing whitespace. A uniform shift preserves relative
+/// indentation, so YAML block scalars inside the snippet survive intact.
+fn indent_block(text: &str, spaces: usize) -> String {
+    let pad = " ".repeat(spaces);
+    let trailing_nl = text.ends_with('\n');
+    let mut joined = text
+        .lines()
+        .map(|l| {
+            if l.trim().is_empty() {
+                String::new()
+            } else {
+                format!("{pad}{l}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if trailing_nl {
+        joined.push('\n');
+    }
+    joined
+}
+
 /// Find all installed blocks in the document. Returns `(name, version, body)` triples.
 pub fn parse_all(doc: &str) -> Vec<ManagedBlock> {
     let mut out = Vec::new();
@@ -112,12 +166,25 @@ pub fn parse_all(doc: &str) -> Vec<ManagedBlock> {
     out
 }
 
-/// Remove the block named `<name>`. Returns the new document and whether anything was removed.
+/// Remove the block named `<name>`. Returns the new document and whether
+/// anything was removed. The cleanup strategy depends on `target`:
 ///
-/// After removal, runs of 2+ consecutive blank lines are collapsed to a single blank line,
-/// and trailing blank lines are stripped. This keeps the file tidy across install/remove cycles
-/// without accidentally fusing previously-separated regions together.
-pub fn remove(doc: &str, name: &str) -> (String, bool) {
+/// - **Just** collapses every run of 2+ blank lines to one and strips trailing
+///   blanks — safe tidying in a comment-and-recipe file.
+/// - **Task** only mends the *removal seam* (a double blank left where the block
+///   was) and strips trailing blanks. It never collapses interior blanks
+///   globally, because a blank line inside a user's YAML literal block scalar
+///   (`cmds: - |`) is significant — global collapse would silently corrupt an
+///   unrelated sibling task on any install (every install runs `upsert` →
+///   `remove`).
+pub fn remove(target: Target, doc: &str, name: &str) -> (String, bool) {
+    match target {
+        Target::Just => remove_just(doc, name),
+        Target::Task => remove_task(doc, name),
+    }
+}
+
+fn remove_just(doc: &str, name: &str) -> (String, bool) {
     let open_prefix = open_marker(name);
     let close = close_marker(name);
 
@@ -163,6 +230,55 @@ pub fn remove(doc: &str, name: &str) -> (String, bool) {
     (joined, removed)
 }
 
+fn remove_task(doc: &str, name: &str) -> (String, bool) {
+    let open_prefix = open_marker(name);
+    let close = close_marker(name);
+
+    let lines: Vec<&str> = doc.lines().collect();
+    let mut out: Vec<&str> = Vec::with_capacity(lines.len());
+    let mut in_block = false;
+    let mut removed = false;
+    let mut seam: Option<usize> = None;
+
+    for line in &lines {
+        if !in_block && line.trim_start().starts_with(&open_prefix) {
+            in_block = true;
+            removed = true;
+            seam = Some(out.len());
+            continue;
+        }
+        if in_block {
+            if line.trim() == close.trim() {
+                in_block = false;
+            }
+            continue;
+        }
+        out.push(line);
+    }
+
+    // Mend only the seam: if the block sat between two blank separators, the
+    // removal left two adjacent blanks — collapse to one. Interior blanks
+    // elsewhere are untouched.
+    if let Some(i) = seam
+        && i > 0
+        && i < out.len()
+        && out[i - 1].trim().is_empty()
+        && out[i].trim().is_empty()
+    {
+        out.remove(i);
+    }
+
+    while out.last().is_some_and(|l| l.trim().is_empty()) {
+        out.pop();
+    }
+
+    let mut joined = out.join("\n");
+    if !joined.is_empty() && doc.ends_with('\n') && !joined.ends_with('\n') {
+        joined.push('\n');
+    }
+    (joined, removed)
+}
+
 /// Append a rendered block to the document, ensuring a blank line separates it from prior content.
 pub fn append(doc: &str, rendered: &str) -> String {
     if doc.is_empty() {
@@ -181,10 +297,16 @@ pub fn append(doc: &str, rendered: &str) -> String {
     out
 }
 
-/// Install or replace: if a block by this name already exists, swap it in place; otherwise append.
-pub fn upsert(doc: &str, name: &str, rendered: &str) -> Result<String> {
-    let (without, _) = remove(doc, name);
-    let merged = append(&without, rendered);
+/// Install or replace `name`'s block with `rendered`. For Just the block is
+/// appended at end-of-file; for Task it is spliced into the top-level `tasks:`
+/// map (creating one if absent). `rendered` must already be in the form
+/// [`render_block`] produced for the same `target` (indented for Task).
+pub fn upsert(target: Target, doc: &str, name: &str, rendered: &str) -> Result<String> {
+    let (without, _) = remove(target, doc, name);
+    let merged = match target {
+        Target::Just => append(&without, rendered),
+        Target::Task => insert_into_tasks(&without, rendered)?,
+    };
 
     // Sanity check: the round-trip parse should now contain exactly one block for `name`.
     let blocks = parse_all(&merged);
@@ -197,6 +319,81 @@ pub fn upsert(doc: &str, name: &str, rendered: &str) -> Result<String> {
         );
     }
     Ok(merged)
+}
+
+/// Splice an already-indented managed block into the end of the top-level
+/// `tasks:` map. Pure text surgery — the YAML is never parsed or re-serialized,
+/// so the user's other tasks, vars, includes, and comments survive byte-for-byte
+/// (the same reason the justfile path edits text rather than an AST). If there is
+/// no `tasks:` map, one is created at end-of-file.
+fn insert_into_tasks(doc: &str, block: &str) -> Result<String> {
+    let lines: Vec<&str> = doc.lines().collect();
+
+    let Some(tasks_idx) = lines.iter().position(|l| is_tasks_key(l)) else {
+        let mut out = doc.to_string();
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        if !out.is_empty() && !out.ends_with("\n\n") {
+            out.push('\n');
+        }
+        out.push_str("tasks:\n");
+        out.push_str(block);
+        return Ok(out);
+    };
+
+    // The map body runs until the next column-0 non-blank line (a sibling
+    // top-level key) or end-of-file.
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(tasks_idx + 1)
+        .find(|(_, l)| !l.trim().is_empty() && !starts_with_space(l))
+        .map(|(i, _)| i)
+        .unwrap_or(lines.len());
+
+    let mut head: Vec<&str> = lines[..end].to_vec();
+    let tail: Vec<&str> = lines[end..].to_vec();
+    while head.last().is_some_and(|l| l.trim().is_empty()) {
+        head.pop();
+    }
+
+    // No blank separator when the map is empty (head ends at the `tasks:` line);
+    // otherwise one blank line before our block.
+    let map_is_empty = head.len() <= tasks_idx + 1;
+
+    let mut out: Vec<String> = head.iter().map(|s| s.to_string()).collect();
+    if !map_is_empty {
+        out.push(String::new());
+    }
+    out.extend(block.lines().map(|s| s.to_string()));
+    if !tail.is_empty() {
+        out.push(String::new());
+        out.extend(tail.iter().map(|s| s.to_string()));
+    }
+
+    let mut joined = out.join("\n");
+    joined.push('\n');
+    Ok(joined)
+}
+
+/// A column-0 line introducing the block-style `tasks:` mapping — exactly
+/// `tasks:` with nothing but optional whitespace or a trailing `# comment`
+/// after it. A scalar/flow value (`tasks: {…}`) is deliberately not matched so
+/// we never try to splice by indentation into something that isn't a block map.
+fn is_tasks_key(line: &str) -> bool {
+    if starts_with_space(line) {
+        return false;
+    }
+    let Some(rest) = line.strip_prefix("tasks:") else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    rest.is_empty() || rest.starts_with('#')
+}
+
+fn starts_with_space(line: &str) -> bool {
+    line.starts_with(' ') || line.starts_with('\t')
 }
 
 /// Pull the raw text of the named managed block out of `doc`, including the
@@ -318,6 +515,7 @@ pub fn validate_name(name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::target::Target;
 
     #[test]
     fn render_and_parse_roundtrip() {
@@ -400,7 +598,7 @@ mod tests {
     fn remove_strips_block_and_collapses_blanks() {
         let block = render("foo", "0.1.0", None, None, &[], "bar:\n    @echo hi\n");
         let doc = format!("first:\n    @echo a\n\n{}\nlast:\n    @echo b\n", block);
-        let (out, removed) = remove(&doc, "foo");
+        let (out, removed) = remove(Target::Just, &doc, "foo");
         assert!(removed);
         assert!(!out.contains("jtr:foo"));
         assert!(out.contains("first:"));
@@ -419,7 +617,7 @@ mod tests {
         let foo_bar = render("foo-bar", "0.2.0", None, None, &[], "foo-bar:\n    @echo b");
         let doc = format!("default:\n    @echo hi\n\n{}\n{}", foo, foo_bar);
 
-        let (out, removed) = remove(&doc, "foo");
+        let (out, removed) = remove(Target::Just, &doc, "foo");
         assert!(removed);
         assert!(!out.contains("# >>> jtr:foo@"));
         assert!(out.contains("# >>> jtr:foo-bar@0.2.0 >>>"));
@@ -431,7 +629,7 @@ mod tests {
     fn remove_trailing_block_does_not_leave_blank_tail() {
         let block = render("foo", "0.1.0", None, None, &[], "bar:\n    @echo hi");
         let doc = format!("default:\n    @echo a\n\n{}", block);
-        let (out, _) = remove(&doc, "foo");
+        let (out, _) = remove(Target::Just, &doc, "foo");
         assert!(out.ends_with("@echo a\n"));
     }
 
@@ -440,7 +638,7 @@ mod tests {
         let v1 = render("foo", "0.1.0", None, None, &[], "old-body");
         let v2 = render("foo", "0.2.0", None, None, &[], "new-body");
         let doc = format!("default:\n    @echo hi\n\n{}", v1);
-        let updated = upsert(&doc, "foo", &v2).unwrap();
+        let updated = upsert(Target::Just, &doc, "foo", &v2).unwrap();
         assert!(updated.contains("new-body"));
         assert!(!updated.contains("old-body"));
         assert!(updated.contains("@0.2.0"));
@@ -459,5 +657,167 @@ mod tests {
         assert!(validate_name("hello world").is_err());
         assert!(validate_name("hello-world").is_ok());
         assert!(validate_name("user/repo").is_ok());
+    }
+
+    const TASK_SNIPPET: &str =
+        "db-up:\n  desc: Start postgres\n  cmds:\n    - docker run --rm postgres";
+
+    #[test]
+    fn task_render_block_indents_every_line_by_two() {
+        let rendered = render_block(
+            Target::Task,
+            "postgres-dev",
+            "0.1.0",
+            Some("https://example.com"),
+            None,
+            &[],
+            TASK_SNIPPET,
+        );
+        // Every non-blank line gains exactly two leading spaces; markers included.
+        for line in rendered.lines() {
+            if !line.trim().is_empty() {
+                assert!(
+                    line.starts_with("  "),
+                    "line not indented under tasks:: {line:?}"
+                );
+            }
+        }
+        assert!(rendered.contains("  # >>> jtr:postgres-dev@0.1.0 >>>"));
+        assert!(rendered.contains("  db-up:"));
+        assert!(rendered.contains("    desc: Start postgres"));
+        assert!(rendered.contains("      - docker run --rm postgres"));
+        assert!(rendered.contains("  # <<< jtr:postgres-dev <<<"));
+    }
+
+    // The load-bearing invariant for Task idempotency: the text we write into the
+    // tasks: map (render_block) must be byte-identical to what extract_block_text
+    // reads back. If it drifts, `jtr update` reports a spurious "would refresh"
+    // and rewrites the file on every run.
+    #[test]
+    fn task_render_insert_extract_roundtrips() {
+        let taskfile = "version: '3'\n\ntasks:\n  default:\n    cmds:\n      - task --list\n";
+        let rendered = render_block(
+            Target::Task,
+            "postgres-dev",
+            "0.1.0",
+            Some("https://example.com"),
+            None,
+            &["clean".to_string()],
+            TASK_SNIPPET,
+        );
+        let merged = upsert(Target::Task, taskfile, "postgres-dev", &rendered).unwrap();
+
+        let extracted = extract_block_text(&merged, "postgres-dev");
+        assert_eq!(extracted, rendered, "on-disk block must equal render_block");
+
+        // And the block round-trips through the generic parser.
+        let parsed = parse_all(&merged);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "postgres-dev");
+        assert_eq!(parsed[0].version, "0.1.0");
+        assert_eq!(parsed[0].dependencies, vec!["clean".to_string()]);
+    }
+
+    #[test]
+    fn task_insert_into_empty_tasks_map() {
+        let taskfile = "version: '3'\n\ntasks:\n";
+        let rendered = render_block(Target::Task, "foo", "0.1.0", None, None, &[], TASK_SNIPPET);
+        let merged = upsert(Target::Task, taskfile, "foo", &rendered).unwrap();
+        // No spurious blank line between `tasks:` and the first managed entry.
+        assert!(merged.contains("tasks:\n  # >>> jtr:foo@0.1.0 >>>"));
+        assert!(merged.starts_with("version: '3'"));
+    }
+
+    #[test]
+    fn task_insert_preserves_following_top_level_key() {
+        let taskfile =
+            "version: '3'\n\ntasks:\n  default:\n    cmds:\n      - echo hi\n\nvars:\n  FOO: bar\n";
+        let rendered = render_block(Target::Task, "foo", "0.1.0", None, None, &[], TASK_SNIPPET);
+        let merged = upsert(Target::Task, taskfile, "foo", &rendered).unwrap();
+        // The block lands inside the tasks map, before the next top-level key.
+        let foo_at = merged.find("  # >>> jtr:foo@").unwrap();
+        let vars_at = merged.find("\nvars:").unwrap();
+        let default_at = merged.find("  default:").unwrap();
+        assert!(default_at < foo_at, "block should follow existing tasks");
+        assert!(
+            foo_at < vars_at,
+            "block must stay inside tasks: not after vars:"
+        );
+        assert!(merged.contains("vars:\n  FOO: bar"));
+    }
+
+    #[test]
+    fn task_insert_creates_tasks_map_when_absent() {
+        let taskfile = "version: '3'\n\nincludes:\n  docker: ./docker.yml\n";
+        let rendered = render_block(Target::Task, "foo", "0.1.0", None, None, &[], TASK_SNIPPET);
+        let merged = upsert(Target::Task, taskfile, "foo", &rendered).unwrap();
+        assert!(merged.contains("includes:\n  docker: ./docker.yml"));
+        assert!(merged.contains("tasks:\n  # >>> jtr:foo@0.1.0 >>>"));
+        assert_eq!(parse_all(&merged).len(), 1);
+    }
+
+    // Direct hit on "preserves the user's other tasks": a sibling task with a
+    // literal block scalar whose value contains blank lines. Installing (and then
+    // removing) an unrelated managed block must not collapse those interior blanks.
+    #[test]
+    fn task_install_remove_preserves_sibling_block_scalar() {
+        let taskfile = "version: '3'\n\ntasks:\n  greet:\n    cmds:\n      - |\n        echo a\n\n\n        echo b\n";
+        let rendered = render_block(Target::Task, "foo", "0.1.0", None, None, &[], TASK_SNIPPET);
+
+        let installed = upsert(Target::Task, taskfile, "foo", &rendered).unwrap();
+        assert!(
+            installed.contains("        echo a\n\n\n        echo b"),
+            "block scalar blanks must survive install"
+        );
+
+        let (removed, did) = remove(Target::Task, &installed, "foo");
+        assert!(did);
+        assert!(!removed.contains("jtr:foo@"));
+        assert!(
+            removed.contains("        echo a\n\n\n        echo b"),
+            "block scalar blanks must survive remove: {removed:?}"
+        );
+    }
+
+    #[test]
+    fn task_remove_mends_seam_to_single_blank() {
+        let a = render_block(
+            Target::Task,
+            "a",
+            "0.1.0",
+            None,
+            None,
+            &[],
+            "a-task:\n  cmds:\n    - echo a",
+        );
+        let b = render_block(
+            Target::Task,
+            "b",
+            "0.1.0",
+            None,
+            None,
+            &[],
+            "b-task:\n  cmds:\n    - echo b",
+        );
+        let base = "version: '3'\n\ntasks:\n  default:\n    cmds:\n      - echo hi\n";
+        let with_a = upsert(Target::Task, base, "a", &a).unwrap();
+        let with_both = upsert(Target::Task, &with_a, "b", &b).unwrap();
+        let (after, _) = remove(Target::Task, &with_both, "a");
+        assert!(
+            !after.contains("\n\n\n"),
+            "seam should collapse to one blank: {after:?}"
+        );
+        assert!(after.contains("# >>> jtr:b@"));
+    }
+
+    #[test]
+    fn is_tasks_key_matches_only_block_style_top_level() {
+        assert!(is_tasks_key("tasks:"));
+        assert!(is_tasks_key("tasks:   "));
+        assert!(is_tasks_key("tasks: # the recipes"));
+        assert!(!is_tasks_key("  tasks:"));
+        assert!(!is_tasks_key("tasks: {}"));
+        assert!(!is_tasks_key("tasks_extra:"));
+        assert!(!is_tasks_key("version: '3'"));
     }
 }

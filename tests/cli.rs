@@ -1712,11 +1712,11 @@ fn doctor_flags_pinned_version_no_longer_published() {
 }
 
 #[test]
-fn install_into_taskfile_errors_because_no_seed_supports_task_yet() {
-    // Seed recipes only declare a `just` target today. Installing into a Taskfile.yml
-    // should fail with a clear "does not support target 'task'" message. When the first
-    // task-supporting recipe lands, add a sibling test for the "task target not yet
-    // implemented" code path.
+fn install_recipe_without_task_target_into_taskfile_errors() {
+    // `postgres-dev` declares only a `just` target. Installing it into a Taskfile.yml
+    // must fail with a clear "does not support target 'task'" message rather than
+    // writing an empty/garbage block. (Recipes that DO declare a task target — e.g.
+    // the curated `redis-dev` — install fine; see the task_* tests below.)
     let project = TempDir::new().unwrap();
     fs::write(project.path().join("Taskfile.yml"), "version: '3'\n").unwrap();
 
@@ -3175,4 +3175,398 @@ fn update_no_arg_on_current_blocks_reports_already_current_not_refreshed() {
         before, after,
         "a genuine no-op update must leave the file byte-identical"
     );
+}
+
+// --- Task (YAML) write target ---------------------------------------------
+//
+// These mirror the justfile suite against Taskfile.yml fixtures: install nests
+// the block under `tasks:`, remove/update/doctor/dependencies behave identically,
+// and a user's other tasks (including literal block scalars) survive byte-for-byte.
+// They never shell out to `task`, so they pass on runners without it installed.
+
+fn project_with_taskfile(initial: &str) -> TempDir {
+    let dir = TempDir::new().expect("create temp dir");
+    fs::write(dir.path().join("Taskfile.yml"), initial).expect("write Taskfile.yml");
+    dir
+}
+
+/// A starter Taskfile with one user-authored task, used as the install target.
+const TASKFILE_WITH_DEFAULT: &str =
+    "version: '3'\n\ntasks:\n  default:\n    desc: List tasks\n    cmds:\n      - task --list\n";
+
+/// Single-recipe index publishing `<recipe>` with a `task` target. The snippet
+/// carries `marker-<version>` in its `desc:` so a test can detect which version
+/// landed and assert that update swapped it.
+fn write_task_index(dir: &Path, recipe: &str, version: &str) -> String {
+    let recipes_dir = dir.join("recipes");
+    fs::create_dir_all(&recipes_dir).unwrap();
+
+    let manifest = format!(
+        r#"{{
+  "name": "{recipe}",
+  "version": "{version}",
+  "description": "task fixture {recipe}",
+  "shells_out_to": [],
+  "targets": {{
+    "task": {{
+      "snippet": "{recipe}-up:\n  desc: marker-{version}\n  cmds:\n    - echo {recipe}\n"
+    }}
+  }}
+}}"#
+    );
+    fs::write(recipes_dir.join(format!("{recipe}.json")), &manifest).unwrap();
+    let sha = sha256_hex(manifest.as_bytes());
+
+    let index = format!(
+        r#"{{
+  "version": 1,
+  "recipes": [
+    {{
+      "name": "{recipe}",
+      "version": "{version}",
+      "description": "task fixture {recipe}",
+      "manifest_url": "recipes/{recipe}.json",
+      "targets": ["task"],
+      "sha256": "{sha}"
+    }}
+  ]
+}}"#
+    );
+    fs::write(dir.join("index.json"), index).unwrap();
+    format!("file://{}/index.json", dir.display())
+}
+
+/// Multi-recipe index with `task` targets and a dependency graph, mirroring
+/// `write_dep_index` for the Task path.
+fn write_task_dep_index(dir: &Path, recipes: &[(&str, &str, &[&str])]) -> String {
+    let recipes_dir = dir.join("recipes");
+    fs::create_dir_all(&recipes_dir).unwrap();
+
+    let mut index_entries = Vec::new();
+    for (name, version, deps) in recipes {
+        let deps_json = deps
+            .iter()
+            .map(|d| format!("\"{}\"", d))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let manifest = format!(
+            r#"{{
+  "name": "{name}",
+  "version": "{version}",
+  "description": "task dep fixture {name}",
+  "dependencies": [{deps_json}],
+  "targets": {{
+    "task": {{
+      "snippet": "{name}-noop:\n  cmds:\n    - echo {name}\n"
+    }}
+  }}
+}}"#
+        );
+        fs::write(recipes_dir.join(format!("{name}.json")), &manifest).unwrap();
+        let sha = sha256_hex(manifest.as_bytes());
+        index_entries.push(format!(
+            r#"    {{
+      "name": "{name}",
+      "version": "{version}",
+      "description": "task dep fixture {name}",
+      "manifest_url": "recipes/{name}.json",
+      "targets": ["task"],
+      "sha256": "{sha}"
+    }}"#
+        ));
+    }
+
+    let index = format!(
+        r#"{{
+  "version": 1,
+  "recipes": [
+{}
+  ]
+}}"#,
+        index_entries.join(",\n")
+    );
+    fs::write(dir.join("index.json"), index).unwrap();
+    format!("file://{}/index.json", dir.display())
+}
+
+#[test]
+fn task_install_nests_block_under_tasks_map() {
+    let config_dir = TempDir::new().unwrap();
+    let index_dir = TempDir::new().unwrap();
+    let url = write_task_index(index_dir.path(), "redis", "0.1.0");
+    let project = project_with_taskfile(TASKFILE_WITH_DEFAULT);
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &url)
+        .args(["install", "redis"])
+        .assert()
+        .success()
+        .stdout(str::contains("installed"));
+
+    let result = fs::read_to_string(project.path().join("Taskfile.yml")).unwrap();
+    // The user's task is preserved verbatim, and the managed block is nested
+    // under tasks: at two-space indent (markers, body, and close all indented).
+    assert!(result.contains("tasks:\n  default:\n    desc: List tasks"));
+    assert!(result.contains("  # >>> jtr:redis@0.1.0 >>>"));
+    assert!(result.contains("  redis-up:\n    desc: marker-0.1.0"));
+    assert!(result.contains("  # <<< jtr:redis <<<"));
+    // No top-level (column-0) leakage of the recipe's task key.
+    assert!(!result.contains("\nredis-up:"));
+}
+
+#[test]
+fn task_install_then_remove_restores_surrounding_content() {
+    let config_dir = TempDir::new().unwrap();
+    let index_dir = TempDir::new().unwrap();
+    let url = write_task_index(index_dir.path(), "redis", "0.1.0");
+    let project = project_with_taskfile(TASKFILE_WITH_DEFAULT);
+
+    for action in ["install", "remove"] {
+        jtr()
+            .current_dir(project.path())
+            .env("JTR_CONFIG_DIR", config_dir.path())
+            .env("JTR_INDEX_URL", &url)
+            .args([action, "redis"])
+            .assert()
+            .success();
+    }
+
+    let result = fs::read_to_string(project.path().join("Taskfile.yml")).unwrap();
+    assert!(!result.contains("jtr:redis@"));
+    assert!(!result.contains("redis-up:"));
+    // The user's original task survives untouched.
+    assert!(result.contains("tasks:\n  default:\n    desc: List tasks"));
+    assert!(
+        !result.contains("\n\n\n"),
+        "remove must not leave a blank gap"
+    );
+}
+
+#[test]
+fn task_update_swaps_block_to_new_version() {
+    let config_dir = TempDir::new().unwrap();
+    let index_dir = TempDir::new().unwrap();
+    write_task_index(index_dir.path(), "redis", "0.1.0");
+    let url = format!("file://{}/index.json", index_dir.path().display());
+    let project = project_with_taskfile(TASKFILE_WITH_DEFAULT);
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &url)
+        .args(["install", "redis"])
+        .assert()
+        .success();
+
+    // Republish 0.2.0 in place (file:// bypasses the cache by design).
+    write_task_index(index_dir.path(), "redis", "0.2.0");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &url)
+        .args(["update", "redis"])
+        .assert()
+        .success()
+        .stdout(str::contains("updated"));
+
+    let result = fs::read_to_string(project.path().join("Taskfile.yml")).unwrap();
+    assert!(result.contains("# >>> jtr:redis@0.2.0 >>>"));
+    assert!(result.contains("desc: marker-0.2.0"));
+    assert!(!result.contains("marker-0.1.0"));
+    // Exactly one block after the bump.
+    assert_eq!(result.matches("# >>> jtr:redis@").count(), 1);
+}
+
+#[test]
+fn task_update_dry_run_is_silent_noop_when_current() {
+    let config_dir = TempDir::new().unwrap();
+    let index_dir = TempDir::new().unwrap();
+    let url = write_task_index(index_dir.path(), "redis", "0.1.0");
+    let project = project_with_taskfile(TASKFILE_WITH_DEFAULT);
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &url)
+        .args(["install", "redis"])
+        .assert()
+        .success();
+
+    let before = fs::read_to_string(project.path().join("Taskfile.yml")).unwrap();
+
+    // A freshly-installed Task block must read back byte-identical to what would
+    // be re-rendered, so --dry-run prints nothing and exits 0. This is the
+    // end-to-end guard for the indent-determinism idempotency invariant.
+    let assert = jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &url)
+        .args(["update", "--dry-run"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.trim().is_empty(),
+        "current Task block should yield an empty --dry-run, got:\n{stdout}"
+    );
+
+    let after = fs::read_to_string(project.path().join("Taskfile.yml")).unwrap();
+    assert_eq!(before, after, "--dry-run must not touch the file");
+}
+
+#[test]
+fn task_doctor_detects_version_drift() {
+    let config_dir = TempDir::new().unwrap();
+    let index_dir = TempDir::new().unwrap();
+    write_task_index(index_dir.path(), "redis", "0.1.0");
+    let url = format!("file://{}/index.json", index_dir.path().display());
+    let project = project_with_taskfile(TASKFILE_WITH_DEFAULT);
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &url)
+        .args(["install", "redis"])
+        .assert()
+        .success();
+
+    write_task_index(index_dir.path(), "redis", "0.2.0");
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &url)
+        .arg("doctor")
+        .assert()
+        .failure()
+        .stdout(str::contains("newer version available: 0.2.0"));
+}
+
+#[test]
+fn task_install_preserves_sibling_block_scalar_blanks() {
+    // Mixed-content guard: a user task whose command is a literal block scalar
+    // with internal blank lines. Installing an unrelated managed block must not
+    // collapse those blanks (the justfile path's global blank-collapse would).
+    let config_dir = TempDir::new().unwrap();
+    let index_dir = TempDir::new().unwrap();
+    let url = write_task_index(index_dir.path(), "redis", "0.1.0");
+    let initial = "version: '3'\n\ntasks:\n  greet:\n    cmds:\n      - |\n        echo a\n\n\n        echo b\n";
+    let project = project_with_taskfile(initial);
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &url)
+        .args(["install", "redis"])
+        .assert()
+        .success();
+
+    let result = fs::read_to_string(project.path().join("Taskfile.yml")).unwrap();
+    assert!(
+        result.contains("        echo a\n\n\n        echo b"),
+        "block scalar blank lines must survive install:\n{result}"
+    );
+    assert!(result.contains("# >>> jtr:redis@0.1.0 >>>"));
+}
+
+#[test]
+fn task_install_creates_tasks_map_when_absent() {
+    let config_dir = TempDir::new().unwrap();
+    let index_dir = TempDir::new().unwrap();
+    let url = write_task_index(index_dir.path(), "redis", "0.1.0");
+    // A Taskfile with no tasks: map at all (only version + includes).
+    let initial = "version: '3'\n\nincludes:\n  docker: ./docker.yml\n";
+    let project = project_with_taskfile(initial);
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &url)
+        .args(["install", "redis"])
+        .assert()
+        .success();
+
+    let result = fs::read_to_string(project.path().join("Taskfile.yml")).unwrap();
+    assert!(result.contains("includes:\n  docker: ./docker.yml"));
+    assert!(result.contains("tasks:\n  # >>> jtr:redis@0.1.0 >>>"));
+    // The block round-trips through list.
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &url)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(str::contains("redis"));
+}
+
+#[test]
+fn task_dependency_roundtrip_installs_both_blocks_nested() {
+    let config_dir = TempDir::new().unwrap();
+    let index_dir = TempDir::new().unwrap();
+    let url = write_task_dep_index(
+        index_dir.path(),
+        &[("leaf", "0.1.0", &[]), ("root", "0.1.0", &["leaf"])],
+    );
+    let project = project_with_taskfile(TASKFILE_WITH_DEFAULT);
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &url)
+        .args(["install", "root"])
+        .assert()
+        .success();
+
+    let result = fs::read_to_string(project.path().join("Taskfile.yml")).unwrap();
+    let leaf_at = result.find("# >>> jtr:leaf@").expect("leaf block present");
+    let root_at = result.find("# >>> jtr:root@").expect("root block present");
+    assert!(
+        leaf_at < root_at,
+        "dependency must be ordered before its dependent"
+    );
+    // Both nested under tasks:, before the markers — no column-0 task keys.
+    assert!(result.contains("  # >>> jtr:leaf@0.1.0 >>>"));
+    assert!(result.contains("  leaf-noop:"));
+    assert!(result.contains("  root-noop:"));
+}
+
+#[test]
+fn task_install_is_idempotent_for_same_version() {
+    // Mirrors `install_is_idempotent_for_same_version` for the Task path. install
+    // uses a whole-document no-op check (`new_doc == current_doc`), distinct from
+    // update's block-only one, so the Task remove→re-insert round-trip must
+    // reproduce the file byte-for-byte for a re-install to be a true no-op.
+    let config_dir = TempDir::new().unwrap();
+    let index_dir = TempDir::new().unwrap();
+    let url = write_task_index(index_dir.path(), "redis", "0.1.0");
+    let project = project_with_taskfile(TASKFILE_WITH_DEFAULT);
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &url)
+        .args(["install", "redis"])
+        .assert()
+        .success();
+    let after_first = fs::read_to_string(project.path().join("Taskfile.yml")).unwrap();
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &url)
+        .args(["install", "redis"])
+        .assert()
+        .success()
+        .stdout(str::contains("already at version"));
+    let after_second = fs::read_to_string(project.path().join("Taskfile.yml")).unwrap();
+
+    assert_eq!(
+        after_first, after_second,
+        "a second install of the same version must leave the Taskfile byte-identical"
+    );
+    assert_eq!(after_second.matches("# >>> jtr:redis@").count(), 1);
 }

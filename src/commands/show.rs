@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use crate::commands::install::{describe_missing, split_pin};
 use crate::managed;
@@ -49,20 +49,14 @@ pub fn run(
         )
     })?;
 
-    if target == target::Target::Task {
-        bail!(
-            "writing into Taskfile.yml is not yet implemented (planned for v2). \
-             Use --file to point at a justfile to preview the just snippet."
-        );
-    }
-
     let block_name = block_name_for(&source.label, &manifest.name);
     let source_link = manifest
         .homepage
         .clone()
         .unwrap_or_else(|| source.registry.base().to_string());
 
-    let rendered = managed::render(
+    let rendered = managed::render_block(
+        target,
         &block_name,
         &manifest.version,
         Some(&source_link),

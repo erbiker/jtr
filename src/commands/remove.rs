@@ -7,7 +7,7 @@ use crate::target;
 pub fn run(name: &str, force: bool, file_override: Option<&str>) -> Result<()> {
     managed::validate_name(name)?;
 
-    let (path, _target) = target::resolve(file_override)?;
+    let (path, target) = target::resolve(file_override)?;
     let existing = std::fs::read_to_string(&path)
         .with_context(|| format!("could not read {}", path.display()))?;
 
@@ -30,7 +30,7 @@ pub fn run(name: &str, force: bool, file_override: Option<&str>) -> Result<()> {
         }
     }
 
-    let (updated, removed) = managed::remove(&existing, name);
+    let (updated, removed) = managed::remove(target, &existing, name);
     if !removed {
         println!(
             "{} no managed block named '{}' in {}",
