@@ -3570,3 +3570,52 @@ fn task_install_is_idempotent_for_same_version() {
     );
     assert_eq!(after_second.matches("# >>> jtr:redis@").count(), 1);
 }
+
+/// Regression for #19: piping multi-line output into a reader that closes the
+/// pipe early (`jtr search | head`, `jtr list | grep -q`) must not panic. Rust
+/// defaults SIGPIPE to SIG_IGN, so a write to a closed pipe returned EPIPE and
+/// `println!` panicked; `main` now resets SIGPIPE to SIG_DFL.
+///
+/// We close the read end *before* jtr's first write (rather than reading a line
+/// first) so the very first write hits a reader-less pipe deterministically —
+/// reading first would race jtr dumping its small output into the pipe buffer
+/// and exiting cleanly before we close.
+#[cfg(unix)]
+#[test]
+fn writing_to_a_closed_pipe_does_not_panic() {
+    use std::io::Read;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{Command as StdCommand, Stdio};
+
+    let config_dir = TempDir::new().unwrap();
+    let mut child = StdCommand::new(env!("CARGO_BIN_EXE_jtr"))
+        .arg("search")
+        .env("JTR_INDEX_URL", sample_index_url())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn jtr");
+
+    drop(child.stdout.take());
+
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("stderr piped")
+        .read_to_string(&mut stderr)
+        .expect("read stderr");
+    let status = child.wait().expect("wait for jtr");
+
+    assert!(
+        !stderr.contains("panicked") && !stderr.contains("Broken pipe"),
+        "jtr panicked writing to a closed pipe (status: {status:?}):\n{stderr}"
+    );
+    // SIGPIPE is 13 on Linux/macOS; SIG_DFL termination should report it.
+    assert_eq!(
+        status.signal(),
+        Some(13),
+        "expected termination by SIGPIPE, got {status:?}"
+    );
+}
