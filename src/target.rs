@@ -28,6 +28,24 @@ pub fn resolve(file_override: Option<&str>) -> Result<(PathBuf, Target)> {
         return Ok((p, target));
     }
 
+    let cwd = std::env::current_dir().context("could not read current directory")?;
+    find_in_dir(&cwd)?.ok_or_else(|| {
+        anyhow!(
+            "no justfile or Taskfile.yml found in {}. Pass --file to specify one.",
+            cwd.display()
+        )
+    })
+}
+
+/// Best-effort project-file lookup for commands that work whether or not one is
+/// present (e.g. `jtr tap remove`'s dependent-block guard). Returns `Ok(None)`
+/// when the cwd holds no recognised project file, vs `resolve`, which errors.
+pub fn find_project_file() -> Result<Option<(PathBuf, Target)>> {
+    let cwd = std::env::current_dir().context("could not read current directory")?;
+    find_in_dir(&cwd)
+}
+
+fn find_in_dir(dir: &Path) -> Result<Option<(PathBuf, Target)>> {
     let candidates: &[(&str, Target)] = &[
         ("justfile", Target::Just),
         ("Justfile", Target::Just),
@@ -37,19 +55,13 @@ pub fn resolve(file_override: Option<&str>) -> Result<(PathBuf, Target)> {
         ("taskfile.yml", Target::Task),
         ("taskfile.yaml", Target::Task),
     ];
-
-    let cwd = std::env::current_dir().context("could not read current directory")?;
     for (name, target) in candidates {
-        let path = cwd.join(name);
+        let path = dir.join(name);
         if path.is_file() {
-            return Ok((path, *target));
+            return Ok(Some((path, *target)));
         }
     }
-
-    Err(anyhow!(
-        "no justfile or Taskfile.yml found in {}. Pass --file to specify one.",
-        cwd.display()
-    ))
+    Ok(None)
 }
 
 fn classify(path: &Path) -> Option<Target> {

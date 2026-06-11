@@ -859,6 +859,214 @@ fn tap_remove_unknown_errors() {
 }
 
 #[test]
+fn tap_add_branch_override_uses_branch_in_url() {
+    let config_dir = TempDir::new().unwrap();
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "add", "alice/recipes@release/v1"])
+        .assert()
+        .success()
+        .stdout(str::contains("added tap"))
+        // The stored tap name stays `user/repo`; the branch only shapes the URL.
+        .stdout(str::contains("alice/recipes"))
+        .stdout(str::contains(
+            "raw.githubusercontent.com/alice/recipes/release/v1/index.json",
+        ));
+
+    let taps_file = fs::read_to_string(config_dir.path().join("taps.toml")).unwrap();
+    // Name persisted without the @branch suffix — otherwise `jtr install
+    // alice/recipes/<recipe>` would no longer resolve against this tap.
+    assert!(taps_file.contains("\"alice/recipes\""));
+    assert!(!taps_file.contains("@release"));
+    assert!(taps_file.contains("/release/v1/index.json"));
+}
+
+#[test]
+fn tap_add_rejects_empty_and_malformed_branch() {
+    let config_dir = TempDir::new().unwrap();
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "add", "alice/recipes@"])
+        .assert()
+        .failure()
+        .stderr(str::contains("branch is empty"));
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "add", "alice/recipes@bad branch"])
+        .assert()
+        .failure()
+        .stderr(str::contains("outside"));
+}
+
+#[test]
+fn tap_add_url_overrides_branch_with_warning() {
+    let config_dir = TempDir::new().unwrap();
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args([
+            "tap",
+            "add",
+            "alice/recipes@feature-x",
+            "--url",
+            "file:///tmp/explicit-index.json",
+        ])
+        .assert()
+        .success()
+        .stderr(str::contains("--url takes precedence"))
+        .stdout(str::contains("file:///tmp/explicit-index.json"));
+
+    let taps_file = fs::read_to_string(config_dir.path().join("taps.toml")).unwrap();
+    assert!(taps_file.contains("file:///tmp/explicit-index.json"));
+    assert!(!taps_file.contains("feature-x"));
+}
+
+#[test]
+fn tap_remove_blocked_by_installed_block_then_force() {
+    let config_dir = TempDir::new().unwrap();
+    let tap_dir = TempDir::new().unwrap();
+    let tap_index = write_tap_index(tap_dir.path(), "fancy-build", "0.1.0", "tap-marker");
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "add", "alice/recipes", "--url", &tap_index])
+        .assert()
+        .success();
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["install", "alice/recipes/fancy-build"])
+        .assert()
+        .success();
+
+    // From the project dir, removing the tap is blocked by the installed block.
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "remove", "alice/recipes"])
+        .assert()
+        .failure()
+        .stderr(str::contains("alice/recipes/fancy-build"))
+        .stderr(str::contains("--force"));
+
+    // The blocked remove didn't persist — the tap is still configured.
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "list"])
+        .assert()
+        .success()
+        .stdout(str::contains("alice/recipes"));
+
+    // --force drops the tap and orphans the block.
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "remove", "alice/recipes", "--force"])
+        .assert()
+        .success()
+        .stdout(str::contains("removed tap"));
+
+    // Tap gone; the managed block remains in the justfile (now orphaned).
+    let body = fs::read_to_string(project.path().join("justfile")).unwrap();
+    assert!(body.contains("# >>> jtr:alice/recipes/fancy-build@"));
+}
+
+#[test]
+fn tap_remove_guard_ignores_sibling_tap_blocks() {
+    // A block from `alice/recipes-extra` must not block removing `alice/recipes`
+    // — the trailing-slash boundary in block_belongs_to_tap is what guarantees it.
+    let config_dir = TempDir::new().unwrap();
+    let tap_dir = TempDir::new().unwrap();
+    let tap_index = write_tap_index(tap_dir.path(), "fancy-build", "0.1.0", "extra-marker");
+    let project = project_with_justfile("default:\n    @echo hi\n");
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "add", "alice/recipes-extra", "--url", &tap_index])
+        .assert()
+        .success();
+    // Configure the lookalike tap too, so removing it is a legal operation.
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "add", "alice/recipes", "--url", &tap_index])
+        .assert()
+        .success();
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["install", "alice/recipes-extra/fancy-build"])
+        .assert()
+        .success();
+
+    // Removing `alice/recipes` (no blocks) is not blocked by the
+    // `alice/recipes-extra/...` block.
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "remove", "alice/recipes"])
+        .assert()
+        .success()
+        .stdout(str::contains("removed tap"));
+}
+
+#[test]
+fn tap_add_probe_reports_recipe_count() {
+    let config_dir = TempDir::new().unwrap();
+    let tap_dir = TempDir::new().unwrap();
+    let tap_index = write_tap_index(tap_dir.path(), "fancy-build", "0.1.0", "probe-marker");
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args([
+            "tap",
+            "add",
+            "alice/recipes",
+            "--probe",
+            "--url",
+            &tap_index,
+        ])
+        .assert()
+        .success()
+        .stdout(str::contains("reachable, 1 recipe"))
+        .stdout(str::contains("added tap"));
+}
+
+#[test]
+fn tap_add_probe_failure_does_not_persist() {
+    let config_dir = TempDir::new().unwrap();
+
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args([
+            "tap",
+            "add",
+            "ghost/recipes",
+            "--probe",
+            "--url",
+            "file:///definitely/nonexistent/index.json",
+        ])
+        .assert()
+        .failure()
+        .stderr(str::contains("probe"));
+
+    // Probe ran before persisting, so nothing was written.
+    jtr()
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .args(["tap", "list"])
+        .assert()
+        .success()
+        .stdout(str::contains("no taps configured"));
+}
+
+#[test]
 fn search_spans_curated_and_tap_with_source_labels() {
     let config_dir = TempDir::new().unwrap();
     let tap_dir = TempDir::new().unwrap();
