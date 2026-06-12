@@ -1921,16 +1921,21 @@ fn doctor_flags_pinned_version_no_longer_published() {
 
 #[test]
 fn install_recipe_without_task_target_into_taskfile_errors() {
-    // `postgres-dev` declares only a `just` target. Installing it into a Taskfile.yml
-    // must fail with a clear "does not support target 'task'" message rather than
-    // writing an empty/garbage block. (Recipes that DO declare a task target — e.g.
-    // the curated `redis-dev` — install fine; see the task_* tests below.)
+    // A recipe that declares only a `just` target must fail with a clear
+    // "does not support target 'task'" message when installed into a Taskfile.yml,
+    // rather than writing an empty/garbage block. Uses a synthetic just-only fixture
+    // so the guard is independent of the curated corpus — every curated seed recipe
+    // now ships both targets (see `curated_postgres_dev_installs_into_taskfile`).
+    let config_dir = TempDir::new().unwrap();
+    let index_dir = TempDir::new().unwrap();
+    let url = write_postgres_dev_index(index_dir.path(), "0.1.0");
     let project = TempDir::new().unwrap();
     fs::write(project.path().join("Taskfile.yml"), "version: '3'\n").unwrap();
 
     jtr()
         .current_dir(project.path())
-        .env("JTR_INDEX_URL", sample_index_url())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", &url)
         .args(["install", "postgres-dev"])
         .assert()
         .failure()
@@ -3522,6 +3527,37 @@ fn task_install_nests_block_under_tasks_map() {
     assert!(result.contains("  # <<< jtr:redis <<<"));
     // No top-level (column-0) leakage of the recipe's task key.
     assert!(!result.contains("\nredis-up:"));
+}
+
+#[test]
+fn curated_postgres_dev_installs_into_taskfile() {
+    // jtr-index #23: every curated seed recipe now declares a `task` target, so
+    // installing one that used to be just-only (postgres-dev) into a Taskfile.yml
+    // succeeds and nests the block under `tasks:` instead of erroring. This runs
+    // against the real bundled index, so it also guards the index `targets` entry
+    // and the manifest's task snippet staying in sync.
+    let config_dir = TempDir::new().unwrap();
+    let project = project_with_taskfile(TASKFILE_WITH_DEFAULT);
+
+    jtr()
+        .current_dir(project.path())
+        .env("JTR_CONFIG_DIR", config_dir.path())
+        .env("JTR_INDEX_URL", sample_index_url())
+        .args(["install", "postgres-dev"])
+        .assert()
+        .success()
+        .stdout(str::contains("installed"));
+
+    let result = fs::read_to_string(project.path().join("Taskfile.yml")).unwrap();
+    // The user's task survives and the managed block nests under tasks: at two-space
+    // indent (markers, body, and close all indented).
+    assert!(result.contains("tasks:\n  default:\n    desc: List tasks"));
+    assert!(result.contains("  # >>> jtr:postgres-dev@0.1.0 >>>"));
+    assert!(result.contains("  postgres-up:\n    desc:"));
+    assert!(result.contains("  # <<< jtr:postgres-dev <<<"));
+    // No top-level (column-0) leakage of the recipe's task keys.
+    assert!(!result.contains("\npostgres-up:"));
+    assert!(!result.contains("\npostgres-down:"));
 }
 
 #[test]

@@ -7,8 +7,8 @@
       "version": "0.1.0",
       "description": "Local PostgreSQL development environment via Docker, with healthcheck",
       "manifest_url": "recipes/postgres-dev.json",
-      "targets": ["just"],
-      "sha256": "fd3931586db8d2e69ccb499f7ff5cc279f4007842f9b864f96ca734c8a285d48"
+      "targets": ["just", "task"],
+      "sha256": "22e4db24e199c791dd22356275f0ce8f96e78e5315ea67163d7733d4a9fbb727"
     },
     {
       "name": "redis-dev",
@@ -23,24 +23,24 @@
       "version": "0.1.0",
       "description": "cargo clippy + cargo fmt with sensible flags",
       "manifest_url": "recipes/rust-lint-format.json",
-      "targets": ["just"],
-      "sha256": "22782002c42250b0e5c6e84cff5e4e3ed932337dcb7d6f0507ddd80db0d201d6"
+      "targets": ["just", "task"],
+      "sha256": "d449dded8374f69d87e1e219c867ee650361d020e7576e2ac41b3f2dbba78b74"
     },
     {
       "name": "node-lint-format",
       "version": "0.1.0",
       "description": "eslint + prettier for Node.js projects",
       "manifest_url": "recipes/node-lint-format.json",
-      "targets": ["just"],
-      "sha256": "691fcc0e64eb7aa965efd436c4f9e64b66b01195fd18ae8d7e4b6049d0a8acec"
+      "targets": ["just", "task"],
+      "sha256": "c8f088388b511e53a5ab43a8bbfe3d9c6b157089a58e2dabce7d6002d9fd768e"
     },
     {
       "name": "clean",
       "version": "0.1.0",
       "description": "Smart multi-language clean: target/, dist/, node_modules/, __pycache__/",
       "manifest_url": "recipes/clean.json",
-      "targets": ["just"],
-      "sha256": "918e37f45d2d3d6f0554f6690f290e537b6b0da85c6d1fc69b27f7cfd87adc01"
+      "targets": ["just", "task"],
+      "sha256": "6d9e97bc7ac461b01c0d3affa21afcf2da93e0fa8a82f1da242974af1dde2ff3"
     }
   ]
 }

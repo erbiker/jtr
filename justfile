@@ -86,11 +86,18 @@ smoke: build
     JTR_INDEX_URL="$INDEX" "$BIN" --file "$TASKDEMO/Taskfile.yml" install redis-dev
     grep -q '^  # >>> jtr:redis-dev@' "$TASKDEMO/Taskfile.yml"
     grep -q '^  redis-up:' "$TASKDEMO/Taskfile.yml"
+    # postgres-dev (formerly just-only) now ships a task target too — install it
+    # alongside redis-dev so the parse check below proves two managed task blocks
+    # coexist in one Taskfile.
+    JTR_INDEX_URL="$INDEX" "$BIN" --file "$TASKDEMO/Taskfile.yml" install postgres-dev
+    grep -q '^  # >>> jtr:postgres-dev@' "$TASKDEMO/Taskfile.yml"
+    grep -q '^  postgres-up:' "$TASKDEMO/Taskfile.yml"
     grep -q 'redis-dev' <<<"$(JTR_INDEX_URL="$INDEX" "$BIN" --file "$TASKDEMO/Taskfile.yml" list)"
     # A fresh install reads back identical, so --dry-run is a silent exit-0 no-op.
     test -z "$(JTR_INDEX_URL="$INDEX" "$BIN" --file "$TASKDEMO/Taskfile.yml" update --dry-run)"
     # If `task` is installed, the generated Taskfile must actually parse.
     if command -v task >/dev/null 2>&1; then task -t "$TASKDEMO/Taskfile.yml" --list-all >/dev/null; fi
+    JTR_INDEX_URL="$INDEX" "$BIN" --file "$TASKDEMO/Taskfile.yml" remove postgres-dev
     JTR_INDEX_URL="$INDEX" "$BIN" --file "$TASKDEMO/Taskfile.yml" remove redis-dev
     rm -rf "$TASKDEMO"
     # Lint the curated index — should pass cleanly.
