@@ -62,9 +62,10 @@ smoke: build
     export JTR_CONFIG_DIR=$(mktemp -d)
     trap "rm -rf $DEMO $JTR_CONFIG_DIR" EXIT
     # Capture-then-grep instead of `jtr ... | grep -q`: `grep -q` exits on the
-    # first match and closes the pipe, and jtr currently panics writing to the
-    # broken pipe (tracked separately). Running the producer to completion first
-    # sidesteps the race.
+    # first match and closes the pipe. jtr no longer panics on that (#19, SIGPIPE
+    # reset to SIG_DFL) but it now dies *by* SIGPIPE (exit 141), which `set -o
+    # pipefail` would still surface as a pipeline failure. Running the producer to
+    # completion first keeps these assertions immune to both.
     cd "$DEMO"
     printf 'default:\n    @echo hi\n' > justfile
     JTR_INDEX_URL="$INDEX" "$BIN" install postgres-dev

@@ -694,6 +694,7 @@ dependencies = [
  "clap",
  "colored",
  "directories",
+ "libc",
  "predicates",
  "reqwest",
  "serde",
