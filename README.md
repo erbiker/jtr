@@ -201,13 +201,17 @@ Recipes that live outside the curated index — a private set, a team library, a
 
 ```sh
 jtr tap add alice/recipes              # adds https://raw.githubusercontent.com/alice/recipes/main/index.json
+jtr tap add alice/recipes@release/v1   # pull the index from a branch other than main
+jtr tap add alice/recipes --probe      # fetch the index once and report its recipe count before saving
 jtr tap list                           # see what's configured
 jtr search                             # tap recipes show up with their source label
 jtr install alice/recipes/nice-thing   # install a tap recipe; the prefix routes it
 jtr tap remove alice/recipes           # forget a tap; installed blocks stay in place
 ```
 
-`jtr tap add` accepts a `--url` override for self-hosted indices and offline testing — e.g. `jtr tap add team/recipes --url file:///tmp/index.json`. Tap-installed recipes appear in `jtr list` / `jtr update` / `jtr doctor` under their full `user/repo/recipe` block name, so they're treated the same as curated recipes for every command.
+`jtr tap add` accepts a `--url` override for self-hosted indices and offline testing — e.g. `jtr tap add team/recipes --url file:///tmp/index.json` (`--url` takes precedence over an `@branch` suffix). The optional `@branch` suffix only shapes the URL; the stored tap name stays `user/repo`, so `jtr install user/repo/recipe` resolves the same way. `--probe` validates that the index is reachable *and* a valid jtr index before persisting the tap, failing the add otherwise — off by default so you can stage taps offline. Tap-installed recipes appear in `jtr list` / `jtr update` / `jtr doctor` under their full `user/repo/recipe` block name, so they're treated the same as curated recipes for every command.
+
+`jtr tap remove` guards against forgetting a tap you're still using: if the project file in the current directory has blocks installed from that tap, it refuses and lists them. Pass `--force` to drop the tap anyway — the blocks stay in the file and `jtr doctor` will then flag them as orphaned (`no longer in the registry`).
 
 Taps are stored in `taps.toml` under your platform's config directory (XDG on Linux, `~/Library/Application Support/dev.jtr.jtr/` on macOS). Set `JTR_CONFIG_DIR` to point at a sandbox if you want to inspect or test that location explicitly.
 
