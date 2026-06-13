@@ -95,4 +95,6 @@ The test suite must pass before and after, with no new tests required. If a refa
 
 ## CI
 
-`.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` on every push and PR. **Do not merge red CI.** If CI catches a class of bug that local `just check` did not, add the same check to `just check`.
+`.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` on every push and PR, plus `just smoke` and `just validate-index`. **Do not merge red CI.** If CI catches a class of bug that local `just check` did not, add the same check to `just check`.
+
+CI installs both `just` **and** `task` (go-task) on the runners. That matters because `jtr lint`'s recipe-snippet validation and `just smoke`'s `task --list-all` parse check only fire when the corresponding binary is on `PATH` — without `task`, every curated `task` snippet would ship unvalidated. With both installed, each curated recipe's `just` *and* `task` snippets are parsed against the real runners on every PR. To get the same coverage locally, install `task` (`brew install go-task`) and run `just smoke`.
