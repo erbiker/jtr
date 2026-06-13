@@ -34,6 +34,18 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to ~/.cargo/bin
           fi
 
+      # Without `task` on PATH, smoke's `task --list-all` parse check and
+      # `jtr lint`'s task-snippet validation both silently no-op — so every
+      # curated `task` snippet would ship unchecked by CI. Install it so they
+      # actually fire. Mirrors the `just` step above (no third-party action).
+      - name: install task (go-task, for smoke + lint task-snippet validation)
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            brew install go-task
+          else
+            curl --proto '=https' --tlsv1.2 -sSf https://taskfile.dev/install.sh | sh -s -- -b ~/.cargo/bin
+          fi
+
       - name: cache cargo
         uses: Swatinem/rust-cache@v2
 

@@ -113,6 +113,8 @@ After adding or editing **any** manifest, run `just rehash` (or `scripts/recompu
   ```
   This installs every recipe in the bundled index into a throwaway justfile and asserts that `just --list` parses it cleanly. Your new recipe must pass this check.
 
+  If your recipe ships a `task` (go-task) target, also run `jtr lint --tap jtr-index` with `task` installed (`brew install go-task`) — `lint` parses each `task` snippet against the real `task` binary, and skips that check with a warning if `task` isn't on `PATH`. CI installs `task` and runs this automatically, so a broken `task` snippet fails CI; validating locally first saves a round trip.
+
 ## Code style
 
 - **Errors:** use `anyhow::Result` with `.with_context(...)` for context. Don't introduce custom error enums unless we need programmatic discrimination.
