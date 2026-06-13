@@ -8,6 +8,9 @@
   "targets": {
     "just": {
       "snippet": "# Lint with clippy, treating warnings as errors.\nrust-lint:\n    cargo clippy --all-targets --all-features -- -D warnings\n\n# Auto-format the entire workspace.\nrust-fmt:\n    cargo fmt --all\n\n# Verify formatting without modifying files (for CI).\nrust-fmt-check:\n    cargo fmt --all -- --check\n"
+    },
+    "task": {
+      "snippet": "rust-lint:\n  desc: Lint with clippy, treating warnings as errors\n  cmds:\n    - cargo clippy --all-targets --all-features -- -D warnings\nrust-fmt:\n  desc: Auto-format the entire workspace\n  cmds:\n    - cargo fmt --all\nrust-fmt-check:\n  desc: Verify formatting without modifying files (for CI)\n  cmds:\n    - cargo fmt --all -- --check\n"
     }
   }
 }

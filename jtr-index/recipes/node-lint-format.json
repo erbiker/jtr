@@ -8,6 +8,9 @@
   "targets": {
     "just": {
       "snippet": "# Lint with eslint.\nnode-lint:\n    npx --yes eslint . --max-warnings=0\n\n# Auto-format with prettier.\nnode-fmt:\n    npx --yes prettier --write .\n\n# Verify formatting without modifying files (for CI).\nnode-fmt-check:\n    npx --yes prettier --check .\n"
+    },
+    "task": {
+      "snippet": "node-lint:\n  desc: Lint with eslint\n  cmds:\n    - npx --yes eslint . --max-warnings=0\nnode-fmt:\n  desc: Auto-format with prettier\n  cmds:\n    - npx --yes prettier --write .\nnode-fmt-check:\n  desc: Verify formatting without modifying files (for CI)\n  cmds:\n    - npx --yes prettier --check .\n"
     }
   }
 }
