@@ -110,7 +110,7 @@ Then run `just postgres-up` as usual.
 
 #### Installing into a `Taskfile.yml`
 
-If your project uses [`task`](https://github.com/go-task/task) instead of `just`, `jtr` writes into your `Taskfile.yml` exactly the same way — provided the recipe declares a `task` target (the curated `redis-dev` does). The managed block is the same sentinel-delimited region, just nested under the top-level `tasks:` map:
+If your project uses [`task`](https://github.com/go-task/task) instead of `just`, `jtr` writes into your `Taskfile.yml` exactly the same way — provided the recipe declares a `task` target. All five curated seed recipes do, so they install into a justfile or a Taskfile interchangeably. The managed block is the same sentinel-delimited region, just nested under the top-level `tasks:` map:
 
 ```yaml
 version: '3'
